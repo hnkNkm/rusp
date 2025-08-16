@@ -141,25 +141,42 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
             Ok(then_type)
         }
         
-        Expr::Let { name, type_ann, value } => {
+        Expr::Let { name, type_ann, value, body } => {
             let value_type = type_check(value, env)?;
             
-            if let Some(ann) = type_ann {
+            let binding_type = if let Some(ann) = type_ann {
                 if ann != &value_type && ann != &Type::Inferred {
                     return Err(format!(
                         "Type mismatch: expected {}, got {}",
                         ann, value_type
                     ));
                 }
-                env.insert(name.clone(), ann.clone());
-                Ok(ann.clone())
+                ann.clone()
             } else {
-                env.insert(name.clone(), value_type.clone());
-                Ok(value_type)
+                value_type
+            };
+            
+            if let Some(body_expr) = body {
+                // Let-in expression: type check body in new scope
+                let mut new_env = env.extend();
+                new_env.insert(name.clone(), binding_type);
+                type_check(body_expr, &mut new_env)
+            } else {
+                // Simple let: add to current environment
+                env.insert(name.clone(), binding_type.clone());
+                Ok(binding_type)
             }
         }
         
         Expr::Defn { name, params, return_type, body } => {
+            // First, add the function type to the environment for recursion
+            let func_type = Type::Function {
+                params: params.iter().map(|(_, t)| t.clone()).collect(),
+                return_type: Box::new(return_type.clone()),
+            };
+            env.insert(name.clone(), func_type.clone());
+            
+            // Now type-check the body with the function in scope
             let mut new_env = env.extend();
             
             for (param_name, param_type) in params {
@@ -175,12 +192,6 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                 ));
             }
             
-            let func_type = Type::Function {
-                params: params.iter().map(|(_, t)| t.clone()).collect(),
-                return_type: Box::new(return_type.clone()),
-            };
-            
-            env.insert(name.clone(), func_type.clone());
             Ok(func_type)
         }
         
@@ -266,21 +277,37 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                         }
                         
                         if let Expr::Symbol(name) = &exprs[1] {
-                            let (type_ann, value_idx) = if exprs.len() == 4 {
+                            let (type_ann, value_idx, body) = if exprs.len() == 4 {
+                                // Could be (let name type value) or (let name value body)
+                                if let Expr::Symbol(ty_str) = &exprs[2] {
+                                    if parse_type(ty_str).is_ok() {
+                                        let ty = parse_type(ty_str)?;
+                                        (Some(ty), 3, None)
+                                    } else {
+                                        // Not a type, treat as (let name value body)
+                                        (None, 2, Some(Box::new(exprs[3].clone())))
+                                    }
+                                } else {
+                                    // Not a type symbol, treat as (let name value body)
+                                    (None, 2, Some(Box::new(exprs[3].clone())))
+                                }
+                            } else if exprs.len() == 5 {
+                                // (let name type value body)
                                 if let Expr::Symbol(ty_str) = &exprs[2] {
                                     let ty = parse_type(ty_str)?;
-                                    (Some(ty), 3)
+                                    (Some(ty), 3, Some(Box::new(exprs[4].clone())))
                                 } else {
                                     return Err("Invalid type annotation".to_string());
                                 }
                             } else {
-                                (None, 2)
+                                (None, 2, None)
                             };
                             
                             type_check(&Expr::Let {
                                 name: name.clone(),
                                 type_ann,
                                 value: Box::new(exprs[value_idx].clone()),
+                                body,
                             }, env)
                         } else {
                             Err("Let binding must have a symbol name".to_string())

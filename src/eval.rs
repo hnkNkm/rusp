@@ -24,18 +24,35 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
             }
         }
         
-        Expr::Let { name, value, .. } => {
+        Expr::Let { name, value, body, .. } => {
             let val = eval(value, env)?;
-            env.set(name.clone(), val.clone());
-            Ok(val)
+            
+            if let Some(body_expr) = body {
+                // Let-in expression: evaluate body in new scope
+                let mut new_env = env.extend();
+                new_env.set(name.clone(), val);
+                eval(body_expr, &mut new_env)
+            } else {
+                // Simple let: set in current environment
+                env.set(name.clone(), val.clone());
+                Ok(val)
+            }
         }
         
         Expr::Defn { name, params, body, .. } => {
+            // Extract parameters and body
+            let func_params: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+            let func_body = *body.clone();
+            
+            // Store the function name in the closure environment
+            // We'll look it up at runtime from the calling environment
             let func = Value::Function {
-                params: params.iter().map(|(n, _)| n.clone()).collect(),
-                body: *body.clone(),
-                env: env.clone(),
+                params: func_params,
+                body: func_body,
+                env: env.clone(),  // Use the current environment
             };
+            
+            // Store the function in the outer environment
             env.set(name.clone(), func.clone());
             Ok(func)
         }
@@ -63,7 +80,18 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
                         ));
                     }
                     
+                    // For recursive functions, we need to check if the function name is in the
+                    // current expression and add it to the new environment
                     let mut new_env = func_env.extend();
+                    
+                    // Check if this is a named function call (for recursion)
+                    if let Expr::Symbol(func_name) = &**func {
+                        // If we have the function in the current environment, add it to the new one
+                        if let Some(func_value) = env.get(func_name) {
+                            new_env.set(func_name.clone(), func_value.clone());
+                        }
+                    }
+                    
                     for (param, arg) in params.iter().zip(arg_vals.iter()) {
                         new_env.set(param.clone(), arg.clone());
                     }
@@ -106,16 +134,21 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
                         }
                         
                         if let Expr::Symbol(name) = &exprs[1] {
-                            let value = if exprs.len() == 4 {
-                                exprs[3].clone()
+                            let (value, body) = if exprs.len() == 4 {
+                                // Could be (let name type value) or (let name value body)
+                                // We need to check if exprs[2] is a type
+                                (exprs[2].clone(), Some(Box::new(exprs[3].clone())))
+                            } else if exprs.len() == 3 {
+                                (exprs[2].clone(), None)
                             } else {
-                                exprs[2].clone()
+                                return Err("Invalid let expression".to_string());
                             };
                             
                             eval(&Expr::Let {
                                 name: name.clone(),
                                 type_ann: None,
                                 value: Box::new(value),
+                                body,
                             }, env)
                         } else {
                             Err("Let binding must have a symbol name".to_string())

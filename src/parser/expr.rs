@@ -3,7 +3,7 @@ use crate::parser::types::parse_type_annotation;
 use nom::{
     branch::alt,
     bytes::complete::{escaped, tag, take_while1},
-    character::complete::{char, digit1, multispace0, none_of},
+    character::complete::{char, digit1, multispace0, multispace1, none_of},
     combinator::{map, opt, recognize, value},
     multi::{many0, separated_list0},
     sequence::{delimited, preceded, tuple},
@@ -187,16 +187,33 @@ fn parse_let_expr(input: &str) -> IResult<&str, Expr, crate::parser::error::Pars
     let (input, _) = multispace0(input)?;
     let (input, value) = parse_expr(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    
+    // Check if there's a body expression (let-in form)
+    // Peek ahead to see if there's another expression before the closing paren
+    let (input, body) = match char::<&str, crate::parser::error::ParseError>(')')(input) {
+        Ok((remaining, _)) => {
+            // No body, just value
+            (remaining, None)
+        }
+        Err(_) => {
+            // There's a body expression
+            let (input, body_expr) = parse_expr(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, _) = char(')')(input)?;
+            (input, Some(Box::new(body_expr)))
+        }
+    };
     
     Ok((input, Expr::Let {
         name,
         type_ann,
         value: Box::new(value),
+        body,
     }))
 }
 
 fn parse_defn_expr(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseError> {
+    // Already consumed "defn", parse the rest
     let (input, _) = multispace0(input)?;
     let (input, name) = parse_symbol_name(input)?;
     let (input, _) = multispace0(input)?;
@@ -239,14 +256,27 @@ fn parse_lambda_expr(input: &str) -> IResult<&str, Expr, crate::parser::error::P
 }
 
 fn parse_params(input: &str) -> IResult<&str, Vec<(String, Type)>, crate::parser::error::ParseError> {
-    delimited(
-        char('['),
-        separated_list0(
-            multispace0,
-            parse_param,
-        ),
-        char(']'),
-    )(input)
+    let (input, _) = char('[')(input)?;
+    let (input, _) = multispace0(input)?;
+    
+    let mut params = Vec::new();
+    let mut current_input = input;
+    
+    // Parse parameters until we hit ]
+    loop {
+        // Check for closing bracket
+        if let Ok((remaining, _)) = char::<&str, crate::parser::error::ParseError>(']')(current_input) {
+            return Ok((remaining, params));
+        }
+        
+        // Parse a parameter
+        let (next_input, param) = parse_param(current_input)?;
+        params.push(param);
+        
+        // Skip whitespace after parameter
+        let (next_input, _) = multispace0(next_input)?;
+        current_input = next_input;
+    }
 }
 
 fn parse_param(input: &str) -> IResult<&str, (String, Type), crate::parser::error::ParseError> {

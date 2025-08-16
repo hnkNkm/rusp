@@ -18,6 +18,7 @@ pub enum Expr {
         name: String,
         type_ann: Option<Type>,
         value: Box<Expr>,
+        body: Option<Box<Expr>>,  // Optional body for let-in expressions
     },
     Defn {
         name: String,
@@ -95,11 +96,19 @@ impl fmt::Display for Expr {
             Expr::If { condition, then_branch, else_branch } => {
                 write!(f, "(if {} {} {})", condition, then_branch, else_branch)
             }
-            Expr::Let { name, type_ann, value } => {
-                if let Some(ty) = type_ann {
-                    write!(f, "(let {} {} {})", name, ty, value)
+            Expr::Let { name, type_ann, value, body } => {
+                if let Some(b) = body {
+                    if let Some(ty) = type_ann {
+                        write!(f, "(let {} {} {} {})", name, ty, value, b)
+                    } else {
+                        write!(f, "(let {} {} {})", name, value, b)
+                    }
                 } else {
-                    write!(f, "(let {} {})", name, value)
+                    if let Some(ty) = type_ann {
+                        write!(f, "(let {} {} {})", name, ty, value)
+                    } else {
+                        write!(f, "(let {} {})", name, value)
+                    }
                 }
             }
             Expr::Defn { name, params, return_type, body } => {
