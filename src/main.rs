@@ -4,6 +4,9 @@ mod eval;
 mod parser;
 mod types;
 
+#[cfg(test)]
+mod tests;
+
 use std::io::{self, Write};
 
 use env::Environment;
