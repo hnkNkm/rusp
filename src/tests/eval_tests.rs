@@ -354,4 +354,408 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Division by zero"));
     }
+    
+    // List operation tests
+    
+    #[test]
+    fn test_eval_list_creation() {
+        // Create a list using the list special form
+        let result = eval_str("(list 1 2 3)").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 3);
+                assert!(matches!(values[0], Value::Integer32(1)));
+                assert!(matches!(values[1], Value::Integer32(2)));
+                assert!(matches!(values[2], Value::Integer32(3)));
+            }
+            _ => panic!("Expected List"),
+        }
+        
+        // Empty list
+        let result = eval_str("(list)").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 0);
+            }
+            _ => panic!("Expected empty List"),
+        }
+        
+        // nil is empty list
+        let result = eval_str("nil").unwrap();
+        assert!(matches!(result, Value::Nil));
+    }
+    
+    #[test]
+    fn test_eval_cons() {
+        // Basic cons
+        let result = eval_str("(cons 0 (list 1 2 3))").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 4);
+                assert!(matches!(values[0], Value::Integer32(0)));
+                assert!(matches!(values[1], Value::Integer32(1)));
+            }
+            _ => panic!("Expected List"),
+        }
+        
+        // Cons with nil
+        let result = eval_str("(cons 1 nil)").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 1);
+                assert!(matches!(values[0], Value::Integer32(1)));
+            }
+            _ => panic!("Expected List"),
+        }
+        
+        // Build list with cons
+        let result = eval_str("(cons 1 (cons 2 (cons 3 nil)))").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 3);
+                assert!(matches!(values[0], Value::Integer32(1)));
+                assert!(matches!(values[1], Value::Integer32(2)));
+                assert!(matches!(values[2], Value::Integer32(3)));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+    
+    #[test]
+    fn test_eval_car() {
+        // Get first element
+        let result = eval_str("(car (list 1 2 3))").unwrap();
+        assert!(matches!(result, Value::Integer32(1)));
+        
+        // Car of single element list
+        let result = eval_str("(car (list 42))").unwrap();
+        assert!(matches!(result, Value::Integer32(42)));
+        
+        // Car of empty list should error
+        let result = eval_str("(car nil)");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("car of empty list"));
+    }
+    
+    #[test]
+    fn test_eval_cdr() {
+        // Get rest of list
+        let result = eval_str("(cdr (list 1 2 3))").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 2);
+                assert!(matches!(values[0], Value::Integer32(2)));
+                assert!(matches!(values[1], Value::Integer32(3)));
+            }
+            _ => panic!("Expected List"),
+        }
+        
+        // Cdr of single element list is nil
+        let result = eval_str("(cdr (list 1))").unwrap();
+        assert!(matches!(result, Value::Nil));
+        
+        // Cdr of empty list should error
+        let result = eval_str("(cdr nil)");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cdr of empty list"));
+    }
+    
+    #[test]
+    fn test_eval_null_check() {
+        // null? on nil
+        let result = eval_str("(null? nil)").unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+        
+        // null? on empty list
+        let result = eval_str("(null? (list))").unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+        
+        // null? on non-empty list
+        let result = eval_str("(null? (list 1 2 3))").unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+        
+        // null? on cdr of single element list
+        let result = eval_str("(null? (cdr (list 1)))").unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_eval_length() {
+        // Length of list
+        let result = eval_str("(length (list 1 2 3))").unwrap();
+        assert!(matches!(result, Value::Integer32(3)));
+        
+        // Length of empty list
+        let result = eval_str("(length (list))").unwrap();
+        assert!(matches!(result, Value::Integer32(0)));
+        
+        // Length of nil
+        let result = eval_str("(length nil)").unwrap();
+        assert!(matches!(result, Value::Integer32(0)));
+        
+        // Length of constructed list
+        let result = eval_str("(length (cons 1 (cons 2 nil)))").unwrap();
+        assert!(matches!(result, Value::Integer32(2)));
+    }
+    
+    #[test]
+    fn test_eval_append() {
+        // Append two lists
+        let result = eval_str("(append (list 1 2) (list 3 4))").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 4);
+                assert!(matches!(values[0], Value::Integer32(1)));
+                assert!(matches!(values[3], Value::Integer32(4)));
+            }
+            _ => panic!("Expected List"),
+        }
+        
+        // Append with nil
+        let result = eval_str("(append nil (list 1 2))").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 2);
+            }
+            _ => panic!("Expected List"),
+        }
+        
+        // Append to nil
+        let result = eval_str("(append (list 1 2) nil)").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 2);
+            }
+            _ => panic!("Expected List"),
+        }
+        
+        // Append nil to nil
+        let result = eval_str("(append nil nil)").unwrap();
+        assert!(matches!(result, Value::Nil));
+    }
+    
+    #[test]
+    fn test_eval_nth() {
+        // Access by index
+        let result = eval_str("(nth 0 (list 10 20 30))").unwrap();
+        assert!(matches!(result, Value::Integer32(10)));
+        
+        let result = eval_str("(nth 1 (list 10 20 30))").unwrap();
+        assert!(matches!(result, Value::Integer32(20)));
+        
+        let result = eval_str("(nth 2 (list 10 20 30))").unwrap();
+        assert!(matches!(result, Value::Integer32(30)));
+        
+        // Out of bounds
+        let result = eval_str("(nth 3 (list 10 20 30))");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("out of bounds"));
+        
+        // Negative index
+        let result = eval_str("(nth -1 (list 10 20 30))");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("out of bounds"));
+        
+        // nth on nil
+        let result = eval_str("(nth 0 nil)");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("out of bounds"));
+    }
+    
+    #[test]
+    fn test_eval_quote() {
+        // Quote a list
+        let result = eval_str("'(1 2 3)").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 3);
+                assert!(matches!(values[0], Value::Integer32(1)));
+            }
+            _ => panic!("Expected List"),
+        }
+        
+        // Quote a symbol becomes a string
+        let result = eval_str("'hello").unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "hello"));
+        
+        // Quote nil
+        let result = eval_str("'nil").unwrap();
+        assert!(matches!(result, Value::Nil));
+        
+        // Nested quote
+        let result = eval_str("'(a (b c))").unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 2);
+                assert!(matches!(values[0], Value::String(ref s) if s == "a"));
+                assert!(matches!(values[1], Value::List(_)));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+    
+    #[test]
+    fn test_eval_recursive_sum_list() {
+        let mut env = Environment::new();
+        
+        // Define sum-list
+        let expr = parser::parse(
+            "(defn sum-list [lst: List<i32>] -> i32 (if (null? lst) 0 (+ (car lst) (sum-list (cdr lst)))))"
+        ).unwrap();
+        eval(&expr, &mut env).unwrap();
+        
+        // Test sum-list
+        let expr = parser::parse("(sum-list (list 1 2 3 4 5))").unwrap();
+        let result = eval(&expr, &mut env).unwrap();
+        assert!(matches!(result, Value::Integer32(15)));
+        
+        // Empty list
+        let expr = parser::parse("(sum-list nil)").unwrap();
+        let result = eval(&expr, &mut env).unwrap();
+        assert!(matches!(result, Value::Integer32(0)));
+    }
+    
+    #[test]
+    fn test_eval_recursive_map_inc() {
+        let mut env = Environment::new();
+        
+        // Define map-inc
+        let expr = parser::parse(
+            "(defn map-inc [lst: List<i32>] -> List<i32> (if (null? lst) nil (cons (+ (car lst) 1) (map-inc (cdr lst)))))"
+        ).unwrap();
+        eval(&expr, &mut env).unwrap();
+        
+        // Test map-inc
+        let expr = parser::parse("(map-inc (list 1 2 3))").unwrap();
+        let result = eval(&expr, &mut env).unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 3);
+                assert!(matches!(values[0], Value::Integer32(2)));
+                assert!(matches!(values[1], Value::Integer32(3)));
+                assert!(matches!(values[2], Value::Integer32(4)));
+            }
+            _ => panic!("Expected List"),
+        }
+        
+        // Empty list
+        let expr = parser::parse("(map-inc nil)").unwrap();
+        let result = eval(&expr, &mut env).unwrap();
+        assert!(matches!(result, Value::Nil));
+    }
+    
+    #[test]
+    fn test_eval_recursive_filter_even() {
+        let mut env = Environment::new();
+        
+        // Define is-even helper
+        let expr = parser::parse(
+            "(defn is-even [n: i32] -> bool (= (* (/ n 2) 2) n))"
+        ).unwrap();
+        eval(&expr, &mut env).unwrap();
+        
+        // Define filter-even
+        let expr = parser::parse(
+            "(defn filter-even [lst: List<i32>] -> List<i32> (if (null? lst) nil (if (is-even (car lst)) (cons (car lst) (filter-even (cdr lst))) (filter-even (cdr lst)))))"
+        ).unwrap();
+        eval(&expr, &mut env).unwrap();
+        
+        // Test filter-even
+        let expr = parser::parse("(filter-even (list 1 2 3 4 5 6))").unwrap();
+        let result = eval(&expr, &mut env).unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 3);
+                assert!(matches!(values[0], Value::Integer32(2)));
+                assert!(matches!(values[1], Value::Integer32(4)));
+                assert!(matches!(values[2], Value::Integer32(6)));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+    
+    #[test]
+    fn test_eval_recursive_reverse() {
+        let mut env = Environment::new();
+        
+        // Define reverse
+        let expr = parser::parse(
+            "(defn reverse [lst: List<i32>] -> List<i32> (if (null? lst) nil (append (reverse (cdr lst)) (list (car lst)))))"
+        ).unwrap();
+        eval(&expr, &mut env).unwrap();
+        
+        // Test reverse
+        let expr = parser::parse("(reverse (list 1 2 3 4))").unwrap();
+        let result = eval(&expr, &mut env).unwrap();
+        match result {
+            Value::List(ref values) => {
+                assert_eq!(values.len(), 4);
+                assert!(matches!(values[0], Value::Integer32(4)));
+                assert!(matches!(values[1], Value::Integer32(3)));
+                assert!(matches!(values[2], Value::Integer32(2)));
+                assert!(matches!(values[3], Value::Integer32(1)));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+    
+    #[test]
+    fn test_type_check_list() {
+        // Type check list creation
+        let ty = type_check_str("(list 1 2 3)").unwrap();
+        assert_eq!(ty, Type::List(Box::new(Type::I32)));
+        
+        // Type check cons
+        let ty = type_check_str("(cons 1 (list 2 3))").unwrap();
+        assert_eq!(ty, Type::List(Box::new(Type::I32)));
+        
+        // Type check car
+        let ty = type_check_str("(car (list 1 2 3))").unwrap();
+        assert_eq!(ty, Type::I32);
+        
+        // Type check cdr
+        let ty = type_check_str("(cdr (list 1 2 3))").unwrap();
+        assert_eq!(ty, Type::List(Box::new(Type::I32)));
+        
+        // Type check null?
+        let ty = type_check_str("(null? (list 1 2 3))").unwrap();
+        assert_eq!(ty, Type::Bool);
+        
+        // Type check length
+        let ty = type_check_str("(length (list 1 2 3))").unwrap();
+        assert_eq!(ty, Type::I32);
+        
+        // Type check append
+        let ty = type_check_str("(append (list 1 2) (list 3 4))").unwrap();
+        assert_eq!(ty, Type::List(Box::new(Type::I32)));
+        
+        // Type check nth
+        let ty = type_check_str("(nth 0 (list 1 2 3))").unwrap();
+        assert_eq!(ty, Type::I32);
+    }
+    
+    #[test]
+    fn test_type_check_list_functions() {
+        let mut env = TypeEnv::new();
+        
+        // Type check sum-list function
+        let expr = parser::parse(
+            "(defn sum-list [lst: List<i32>] -> i32 (if (null? lst) 0 (+ (car lst) (sum-list (cdr lst)))))"
+        ).unwrap();
+        let ty = type_check(&expr, &mut env).unwrap();
+        assert_eq!(ty, Type::Function {
+            params: vec![Type::List(Box::new(Type::I32))],
+            return_type: Box::new(Type::I32),
+        });
+        
+        // Type check map-inc function
+        let expr = parser::parse(
+            "(defn map-inc [lst: List<i32>] -> List<i32> (if (null? lst) nil (cons (+ (car lst) 1) (map-inc (cdr lst)))))"
+        ).unwrap();
+        let ty = type_check(&expr, &mut env).unwrap();
+        assert_eq!(ty, Type::Function {
+            params: vec![Type::List(Box::new(Type::I32))],
+            return_type: Box::new(Type::List(Box::new(Type::I32))),
+        });
+    }
 }

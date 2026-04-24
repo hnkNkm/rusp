@@ -90,6 +90,36 @@ impl TypeEnv {
             return_type: Box::new(Type::Inferred),
         });
         
+        // List operations
+        types.insert("cons".to_string(), Type::Function {
+            params: vec![Type::Inferred, Type::List(Box::new(Type::Inferred))],
+            return_type: Box::new(Type::List(Box::new(Type::Inferred))),
+        });
+        types.insert("car".to_string(), Type::Function {
+            params: vec![Type::List(Box::new(Type::Inferred))],
+            return_type: Box::new(Type::Inferred),
+        });
+        types.insert("cdr".to_string(), Type::Function {
+            params: vec![Type::List(Box::new(Type::Inferred))],
+            return_type: Box::new(Type::List(Box::new(Type::Inferred))),
+        });
+        types.insert("null?".to_string(), Type::Function {
+            params: vec![Type::Inferred],
+            return_type: Box::new(Type::Bool),
+        });
+        types.insert("length".to_string(), Type::Function {
+            params: vec![Type::List(Box::new(Type::Inferred))],
+            return_type: Box::new(Type::I32),
+        });
+        types.insert("append".to_string(), Type::Function {
+            params: vec![Type::List(Box::new(Type::Inferred)), Type::List(Box::new(Type::Inferred))],
+            return_type: Box::new(Type::List(Box::new(Type::Inferred))),
+        });
+        types.insert("nth".to_string(), Type::Function {
+            params: vec![Type::I32, Type::List(Box::new(Type::Inferred))],
+            return_type: Box::new(Type::Inferred),
+        });
+        
         TypeEnv { types }
     }
     
@@ -115,6 +145,8 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
         Expr::Float(_) => Ok(Type::F64),
         Expr::Bool(_) => Ok(Type::Bool),
         Expr::String(_) => Ok(Type::String),
+        Expr::Nil => Ok(Type::List(Box::new(Type::Inferred))),
+        Expr::Quote(_) => Ok(Type::List(Box::new(Type::Inferred))), // Quoted expressions become lists
         
         Expr::Symbol(name) => {
             env.get(name)
@@ -131,14 +163,20 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
             let then_type = type_check(then_branch, env)?;
             let else_type = type_check(else_branch, env)?;
             
-            if then_type != else_type {
+            // Use types_match for more flexible type checking
+            if !types_match(&then_type, &else_type) {
                 return Err(format!(
                     "If branches must have same type: {} vs {}",
                     then_type, else_type
                 ));
             }
             
-            Ok(then_type)
+            // Return the more specific type
+            Ok(if then_type == Type::List(Box::new(Type::Inferred)) && else_type != Type::List(Box::new(Type::Inferred)) {
+                else_type
+            } else {
+                then_type
+            })
         }
         
         Expr::Let { name, type_ann, value, body } => {
@@ -233,17 +271,52 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                     
                     let mut actual_return_type = *return_type.clone();
                     
-                    for (arg, param_type) in args.iter().zip(params.iter()) {
+                    for (i, (arg, param_type)) in args.iter().zip(params.iter()).enumerate() {
                         let arg_type = type_check(arg, env)?;
-                        // Inferred type can match any type (for print/println)
-                        if *param_type != Type::Inferred && arg_type != *param_type {
+                        // Check type compatibility
+                        if !types_match(param_type, &arg_type) {
                             return Err(format!(
                                 "Type mismatch in argument: expected {}, got {}",
                                 param_type, arg_type
                             ));
                         }
-                        // If the function returns Inferred, return the actual argument type
-                        if *return_type == Type::Inferred {
+                        // Special handling for list operations
+                        if let Expr::Symbol(fname) = &**func {
+                            match fname.as_str() {
+                                "car" => {
+                                    // car returns the element type of the list
+                                    if let Type::List(elem_type) = &arg_type {
+                                        actual_return_type = *elem_type.clone();
+                                    }
+                                }
+                                "cons" => {
+                                    // cons returns a list of the first argument's type
+                                    if i == 0 {
+                                        actual_return_type = Type::List(Box::new(arg_type.clone()));
+                                    }
+                                }
+                                "cdr" | "append" => {
+                                    // cdr/append preserve the list type of their argument
+                                    if let Type::List(_) = &arg_type {
+                                        actual_return_type = arg_type.clone();
+                                    }
+                                }
+                                "nth" => {
+                                    // nth returns the element type of the list (second arg)
+                                    if i == 1 {
+                                        if let Type::List(elem_type) = &arg_type {
+                                            actual_return_type = *elem_type.clone();
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // If the function returns Inferred, return the actual argument type
+                                    if *return_type == Type::Inferred {
+                                        actual_return_type = arg_type;
+                                    }
+                                }
+                            }
+                        } else if *return_type == Type::Inferred {
                             actual_return_type = arg_type;
                         }
                     }
@@ -270,6 +343,22 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                             then_branch: Box::new(exprs[2].clone()),
                             else_branch: Box::new(exprs[3].clone()),
                         }, env)
+                    }
+                    "list" => {
+                        // Type check all elements and ensure they have the same type
+                        if exprs.len() == 1 {
+                            // Empty list
+                            return Ok(Type::List(Box::new(Type::Inferred)));
+                        }
+                        
+                        let mut elem_types = Vec::new();
+                        for i in 1..exprs.len() {
+                            elem_types.push(type_check(&exprs[i], env)?);
+                        }
+                        
+                        // For now, we'll use the first element's type
+                        // In a more sophisticated system, we'd find the common type
+                        Ok(Type::List(Box::new(elem_types[0].clone())))
                     }
                     "let" => {
                         if exprs.len() < 3 {
@@ -333,10 +422,32 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
 pub fn parse_type(s: &str) -> Result<Type, String> {
     match s {
         "i32" => Ok(Type::I32),
+        "i64" => Ok(Type::I64),
         "f64" => Ok(Type::F64),
         "bool" => Ok(Type::Bool),
         "String" => Ok(Type::String),
         "_" => Ok(Type::Inferred),
         _ => Err(format!("Unknown type: {}", s)),
+    }
+}
+
+fn types_match(expected: &Type, actual: &Type) -> bool {
+    match (expected, actual) {
+        // Inferred matches anything
+        (Type::Inferred, _) | (_, Type::Inferred) => true,
+        
+        // List types match if element types match
+        (Type::List(e1), Type::List(e2)) => types_match(e1, e2),
+        
+        // Function types match if params and return match
+        (Type::Function { params: p1, return_type: r1 }, 
+         Type::Function { params: p2, return_type: r2 }) => {
+            p1.len() == p2.len() && 
+            p1.iter().zip(p2.iter()).all(|(a, b)| types_match(a, b)) &&
+            types_match(r1, r2)
+        }
+        
+        // Exact match
+        (t1, t2) => t1 == t2,
     }
 }

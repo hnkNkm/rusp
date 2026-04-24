@@ -35,6 +35,8 @@ pub enum Expr {
         func: Box<Expr>,
         args: Vec<Expr>,
     },
+    Quote(Box<Expr>),  // Quote expression '(...)
+    Nil,               // Empty list / nil
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +50,7 @@ pub enum Type {
         params: Vec<Type>,
         return_type: Box<Type>,
     },
+    List(Box<Type>),  // List type, e.g., List<i32>
     Inferred,
 }
 
@@ -69,6 +72,7 @@ impl fmt::Display for Type {
                 }
                 write!(f, ") -> {}", return_type)
             }
+            Type::List(elem_type) => write!(f, "List<{}>", elem_type),
             Type::Inferred => write!(f, "_"),
         }
     }
@@ -142,6 +146,8 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
+            Expr::Quote(expr) => write!(f, "'{}", expr),
+            Expr::Nil => write!(f, "nil"),
         }
     }
 }

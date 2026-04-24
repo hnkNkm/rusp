@@ -18,6 +18,8 @@ pub enum Value {
         arity: usize,
         func: fn(&[Value]) -> Result<Value, String>,
     },
+    List(Vec<Value>),  // List value
+    Nil,               // Empty list / nil
 }
 
 impl fmt::Display for Value {
@@ -34,6 +36,17 @@ impl fmt::Display for Value {
             Value::BuiltinFunction { name, arity, .. } => {
                 write!(f, "#<builtin:{}:{}>", name, arity)
             }
+            Value::List(values) => {
+                write!(f, "(")?;
+                for (i, val) in values.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{}", val)?;
+                }
+                write!(f, ")")
+            }
+            Value::Nil => write!(f, "nil"),
         }
     }
 }
@@ -48,6 +61,8 @@ impl Value {
             Value::String(_) => "String",
             Value::Function { .. } => "function",
             Value::BuiltinFunction { .. } => "builtin",
+            Value::List(_) => "list",
+            Value::Nil => "nil",
         }
     }
 }
@@ -307,6 +322,115 @@ impl Environment {
             arity: 1,
             func: |args| {
                 Ok(Value::String(args[0].type_name().to_string()))
+            },
+        });
+        
+        // List operations
+        env.values.insert("cons".to_string(), Value::BuiltinFunction {
+            name: "cons".to_string(),
+            arity: 2,
+            func: |args| {
+                match &args[1] {
+                    Value::List(lst) => {
+                        let mut new_list = vec![args[0].clone()];
+                        new_list.extend(lst.clone());
+                        Ok(Value::List(new_list))
+                    }
+                    Value::Nil => {
+                        Ok(Value::List(vec![args[0].clone()]))
+                    }
+                    _ => Err("cons requires a list as second argument".to_string()),
+                }
+            },
+        });
+        
+        env.values.insert("car".to_string(), Value::BuiltinFunction {
+            name: "car".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::List(lst) if !lst.is_empty() => Ok(lst[0].clone()),
+                    Value::List(_) | Value::Nil => Err("car of empty list".to_string()),
+                    _ => Err("car requires a list".to_string()),
+                }
+            },
+        });
+        
+        env.values.insert("cdr".to_string(), Value::BuiltinFunction {
+            name: "cdr".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::List(lst) if !lst.is_empty() => {
+                        if lst.len() == 1 {
+                            Ok(Value::Nil)
+                        } else {
+                            Ok(Value::List(lst[1..].to_vec()))
+                        }
+                    }
+                    Value::List(_) | Value::Nil => Err("cdr of empty list".to_string()),
+                    _ => Err("cdr requires a list".to_string()),
+                }
+            },
+        });
+        
+        env.values.insert("null?".to_string(), Value::BuiltinFunction {
+            name: "null?".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Nil => Ok(Value::Bool(true)),
+                    Value::List(lst) => Ok(Value::Bool(lst.is_empty())),
+                    _ => Ok(Value::Bool(false)),
+                }
+            },
+        });
+        
+        env.values.insert("length".to_string(), Value::BuiltinFunction {
+            name: "length".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::List(lst) => Ok(Value::Integer32(lst.len() as i32)),
+                    Value::Nil => Ok(Value::Integer32(0)),
+                    _ => Err("length requires a list".to_string()),
+                }
+            },
+        });
+        
+        env.values.insert("append".to_string(), Value::BuiltinFunction {
+            name: "append".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::List(lst1), Value::List(lst2)) => {
+                        let mut new_list = lst1.clone();
+                        new_list.extend(lst2.clone());
+                        Ok(Value::List(new_list))
+                    }
+                    (Value::Nil, Value::List(lst)) => Ok(Value::List(lst.clone())),
+                    (Value::List(lst), Value::Nil) => Ok(Value::List(lst.clone())),
+                    (Value::Nil, Value::Nil) => Ok(Value::Nil),
+                    _ => Err("append requires two lists".to_string()),
+                }
+            },
+        });
+        
+        env.values.insert("nth".to_string(), Value::BuiltinFunction {
+            name: "nth".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::Integer32(n), Value::List(lst)) => {
+                        if *n < 0 || *n as usize >= lst.len() {
+                            Err(format!("Index {} out of bounds", n))
+                        } else {
+                            Ok(lst[*n as usize].clone())
+                        }
+                    }
+                    (Value::Integer32(_), Value::Nil) => Err("Index out of bounds".to_string()),
+                    _ => Err("nth requires an integer index and a list".to_string()),
+                }
             },
         });
         

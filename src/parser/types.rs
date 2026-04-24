@@ -12,8 +12,18 @@ use nom::{
 pub fn parse_type_annotation(input: &str) -> IResult<&str, Type, crate::parser::error::ParseError> {
     alt((
         parse_function_type,
+        parse_list_type,
         parse_basic_type,
     ))(input)
+}
+
+fn parse_list_type(input: &str) -> IResult<&str, Type, crate::parser::error::ParseError> {
+    let (input, _) = tag("List")(input)?;
+    let (input, _) = char('<')(input)?;
+    let (input, inner_type) = parse_type_annotation(input)?;
+    let (input, _) = char('>')(input)?;
+    
+    Ok((input, Type::List(Box::new(inner_type))))
 }
 
 fn parse_basic_type(input: &str) -> IResult<&str, Type, crate::parser::error::ParseError> {

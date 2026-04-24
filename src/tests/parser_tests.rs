@@ -219,8 +219,8 @@ mod tests {
     #[test]
     fn test_parse_empty_list() {
         let result = parse("()").unwrap();
-        // Empty list parses as an empty list, not an error
-        assert_eq!(result, Expr::List(vec![]));
+        // Empty list parses as nil
+        assert_eq!(result, Expr::Nil);
     }
     
     #[test]

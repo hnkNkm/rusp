@@ -13,6 +13,7 @@ use nom::{
 pub fn parse_expr(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseError> {
     let (input, _) = multispace0(input)?;
     alt((
+        parse_quote,
         parse_list,
         parse_atom,
     ))(input)
@@ -107,7 +108,17 @@ fn parse_symbol(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseE
         c.is_alphanumeric() || "+-*/<>=!&|_?.".contains(c)
     })(input)?;
     
-    Ok((input, Expr::Symbol(s.to_string())))
+    // Check for special symbols
+    match s {
+        "nil" => Ok((input, Expr::Nil)),
+        _ => Ok((input, Expr::Symbol(s.to_string()))),
+    }
+}
+
+fn parse_quote(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseError> {
+    let (input, _) = char('\'')(input)?;
+    let (input, expr) = parse_expr(input)?;
+    Ok((input, Expr::Quote(Box::new(expr))))
 }
 
 fn parse_list(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseError> {
@@ -121,7 +132,7 @@ fn parse_list(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseErr
         None => {
             let (input, _) = multispace0(input)?;
             let (input, _) = char(')')(input)?;
-            Ok((input, Expr::List(vec![])))
+            Ok((input, Expr::Nil))  // Empty list is nil
         }
         Some(first_expr) => {
             match &first_expr {
@@ -221,7 +232,8 @@ fn parse_defn_expr(input: &str) -> IResult<&str, Expr, crate::parser::error::Par
     let (input, params) = parse_params(input)?;
     let (input, _) = multispace0(input)?;
     
-    let (input, return_type) = parse_return_type(input)?;
+    let (input, return_type) = opt(parse_return_type)(input)?;
+    let return_type = return_type.unwrap_or(Type::Inferred);
     let (input, _) = multispace0(input)?;
     
     let (input, body) = parse_expr(input)?;
@@ -283,9 +295,16 @@ fn parse_param(input: &str) -> IResult<&str, (String, Type), crate::parser::erro
     let (input, _) = multispace0(input)?;
     let (input, name) = parse_symbol_name(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(':')(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, ty) = parse_type_annotation(input)?;
+    
+    // Type annotation is optional
+    let (input, ty) = if let Ok((input2, _)) = char::<&str, crate::parser::error::ParseError>(':')(input) {
+        let (input2, _) = multispace0(input2)?;
+        let (input2, ty) = parse_type_annotation(input2)?;
+        (input2, ty)
+    } else {
+        // No type annotation, use Inferred
+        (input, Type::Inferred)
+    };
     
     Ok((input, (name, ty)))
 }
