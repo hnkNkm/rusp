@@ -31,8 +31,20 @@ REPLを起動:
 $ cargo run
 Rusp REPL v0.1.0
 Type 'exit' or press Ctrl+C to quit
+(blank line cancels a multi-line input)
 
 > 
+```
+
+カッコが閉じていない式は自動で複数行入力になります。継続中は `..` プロンプトが出ます。途中で空行を入れると入力をキャンセルできます。
+
+```lisp
+> (defn sum [xs: _] -> i32
+..   (match xs
+..     (nil 0)
+..     ((cons h t) (+ h (sum t)))))
+> (sum (list 1 2 3 4 5))
+15: i32
 ```
 
 ## 現在実装済みの機能
