@@ -42,9 +42,11 @@ Type 'exit' or press Ctrl+C to quit
 | 型 | 説明 | 例 |
 |---|------|-----|
 | `i32` | 32ビット整数 | `42`, `-10` |
+| `i64` | 64ビット整数 | `9223372036854775807` |
 | `f64` | 64ビット浮動小数点 | `3.14`, `-0.5` |
 | `bool` | 真偽値 | `true`, `false` |
 | `String` | 文字列 | `"hello"`, `"world"` |
+| `List<T>` | 同種要素のリスト | `(list 1 2 3)`, `nil` |
 
 ### 演算子
 
@@ -73,9 +75,20 @@ Type 'exit' or press Ctrl+C to quit
 - `not` : 否定
 
 ### 組み込み関数
+
+#### 入出力・型
 - `print` : 値を出力
 - `println` : 値を出力して改行
 - `type-of` : 値の型を返す
+
+#### リスト操作
+- `cons` : 先頭に要素を追加 `(cons 0 (list 1 2)) → (0 1 2)`
+- `car` : 先頭要素を取得
+- `cdr` : 先頭を除いた残りのリスト
+- `null?` : 空リストか判定
+- `length` : 要素数
+- `append` : 2つのリストを連結
+- `nth` : n番目の要素を取得 (0-indexed)
 
 ## 構文例
 
@@ -122,6 +135,65 @@ Type 'exit' or press Ctrl+C to quit
 "String": String
 ```
 
+### 関数定義
+```lisp
+; 引数の型・戻り型を明示
+> (defn square [x: i32] -> i32 (* x x))
+
+> (square 7)
+49: i32
+
+; 再帰
+> (defn fact [n: i32] -> i32
+    (if (<= n 1) 1 (* n (fact (- n 1)))))
+
+> (fact 5)
+120: i32
+```
+
+### ラムダとクロージャ
+```lisp
+; 匿名関数
+> ((fn [x: i32 y: i32] -> i32 (+ x y)) 3 4)
+7: i32
+
+; クロージャ (環境をキャプチャ)
+> (let adder (fn [x: i32] -> (fn [y: i32] -> i32 (+ x y))))
+> ((adder 10) 5)
+15: i32
+```
+
+### let-in
+```lisp
+; 局所束縛
+> (let x 10 (let y 20 (+ x y)))
+30: i32
+```
+
+### リスト操作
+```lisp
+> (list 1 2 3)
+(1 2 3): List<i32>
+
+> (cons 0 (list 1 2 3))
+(0 1 2 3): List<i32>
+
+> (car (list 1 2 3))
+1: i32
+
+> (cdr (list 1 2 3))
+(2 3): List<i32>
+
+> (length (list "a" "b" "c"))
+3: i32
+
+; 再帰でリスト総和
+> (defn sum [lst: List<i32>] -> i32
+    (if (null? lst) 0 (+ (car lst) (sum (cdr lst)))))
+> (sum (list 1 2 3 4 5))
+15: i32
+```
+
 ## プロジェクト構造
 
 ```
@@ -156,13 +228,14 @@ Error: 99999999999999999999 is out of i32 range
 
 ## 今後の実装予定
 
-### Phase 1 (短期)
-- [ ] 関数定義 (`defn`)
-- [ ] ラムダ式 (`fn`, `lambda`)
-- [ ] 再帰関数のサポート
+### Phase 1 (短期) — 完了
+- [x] 関数定義 (`defn`)
+- [x] ラムダ式 (`fn`)
+- [x] 再帰関数のサポート
 
 ### Phase 2 (中期)
-- [ ] リスト型とベクター型
+- [x] リスト型 (`List<T>`) と基本操作
+- [ ] 高階関数 (`map`, `filter`, `fold`)
 - [ ] パターンマッチング
 - [ ] 構造体とレコード型
 - [ ] モジュールシステム
