@@ -146,8 +146,7 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
         Expr::Bool(_) => Ok(Type::Bool),
         Expr::String(_) => Ok(Type::String),
         Expr::Nil => Ok(Type::List(Box::new(Type::Inferred))),
-        Expr::Quote(_) => Ok(Type::List(Box::new(Type::Inferred))), // Quoted expressions become lists
-        
+
         Expr::Symbol(name) => {
             env.get(name)
                 .cloned()
@@ -345,20 +344,28 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                         }, env)
                     }
                     "list" => {
-                        // Type check all elements and ensure they have the same type
+                        // Empty list: (list) -> List<_>
                         if exprs.len() == 1 {
-                            // Empty list
                             return Ok(Type::List(Box::new(Type::Inferred)));
                         }
-                        
-                        let mut elem_types = Vec::new();
-                        for i in 1..exprs.len() {
-                            elem_types.push(type_check(&exprs[i], env)?);
+
+                        // Require all elements to share a type with the first.
+                        // types_match allows Inferred on either side so
+                        // `(list 1 nil)` style mixing with unresolved types
+                        // still works where appropriate.
+                        let first_type = type_check(&exprs[1], env)?;
+                        for (offset, elem) in exprs.iter().enumerate().skip(2) {
+                            let elem_type = type_check(elem, env)?;
+                            if !types_match(&first_type, &elem_type) {
+                                return Err(format!(
+                                    "List element type mismatch at position {}: expected {}, got {}",
+                                    offset - 1,
+                                    first_type,
+                                    elem_type
+                                ));
+                            }
                         }
-                        
-                        // For now, we'll use the first element's type
-                        // In a more sophisticated system, we'd find the common type
-                        Ok(Type::List(Box::new(elem_types[0].clone())))
+                        Ok(Type::List(Box::new(first_type)))
                     }
                     "let" => {
                         if exprs.len() < 3 {

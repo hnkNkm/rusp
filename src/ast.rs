@@ -35,7 +35,6 @@ pub enum Expr {
         func: Box<Expr>,
         args: Vec<Expr>,
     },
-    Quote(Box<Expr>),  // Quote expression '(...)
     Nil,               // Empty list / nil
 }
 
@@ -146,7 +145,6 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
-            Expr::Quote(expr) => write!(f, "'{}", expr),
             Expr::Nil => write!(f, "nil"),
         }
     }

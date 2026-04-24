@@ -563,38 +563,6 @@ mod tests {
     }
     
     #[test]
-    fn test_eval_quote() {
-        // Quote a list
-        let result = eval_str("'(1 2 3)").unwrap();
-        match result {
-            Value::List(ref values) => {
-                assert_eq!(values.len(), 3);
-                assert!(matches!(values[0], Value::Integer32(1)));
-            }
-            _ => panic!("Expected List"),
-        }
-        
-        // Quote a symbol becomes a string
-        let result = eval_str("'hello").unwrap();
-        assert!(matches!(result, Value::String(ref s) if s == "hello"));
-        
-        // Quote nil
-        let result = eval_str("'nil").unwrap();
-        assert!(matches!(result, Value::Nil));
-        
-        // Nested quote
-        let result = eval_str("'(a (b c))").unwrap();
-        match result {
-            Value::List(ref values) => {
-                assert_eq!(values.len(), 2);
-                assert!(matches!(values[0], Value::String(ref s) if s == "a"));
-                assert!(matches!(values[1], Value::List(_)));
-            }
-            _ => panic!("Expected List"),
-        }
-    }
-    
-    #[test]
     fn test_eval_recursive_sum_list() {
         let mut env = Environment::new();
         
@@ -733,7 +701,27 @@ mod tests {
         let ty = type_check_str("(nth 0 (list 1 2 3))").unwrap();
         assert_eq!(ty, Type::I32);
     }
-    
+
+    #[test]
+    fn test_type_check_list_heterogeneous_rejected() {
+        // Mixing i32 and String in (list ...) must be a type error.
+        let result = type_check_str("(list 1 \"hello\" 3)");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("List element type mismatch"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_type_check_list_homogeneous_ok() {
+        // Sanity: homogeneous list still type-checks.
+        let ty = type_check_str("(list \"a\" \"b\" \"c\")").unwrap();
+        assert_eq!(ty, Type::List(Box::new(Type::String)));
+    }
+
     #[test]
     fn test_type_check_list_functions() {
         let mut env = TypeEnv::new();

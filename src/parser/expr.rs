@@ -13,7 +13,6 @@ use nom::{
 pub fn parse_expr(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseError> {
     let (input, _) = multispace0(input)?;
     alt((
-        parse_quote,
         parse_list,
         parse_atom,
     ))(input)
@@ -113,12 +112,6 @@ fn parse_symbol(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseE
         "nil" => Ok((input, Expr::Nil)),
         _ => Ok((input, Expr::Symbol(s.to_string()))),
     }
-}
-
-fn parse_quote(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseError> {
-    let (input, _) = char('\'')(input)?;
-    let (input, expr) = parse_expr(input)?;
-    Ok((input, Expr::Quote(Box::new(expr))))
 }
 
 fn parse_list(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseError> {

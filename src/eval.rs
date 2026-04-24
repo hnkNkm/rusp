@@ -9,12 +9,7 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::String(s) => Ok(Value::String(s.clone())),
         Expr::Nil => Ok(Value::Nil),
-        
-        Expr::Quote(inner) => {
-            // Convert quoted expression to a list value
-            expr_to_list_value(inner)
-        }
-        
+
         Expr::Symbol(name) => {
             env.get(name)
                 .cloned()
@@ -185,23 +180,3 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
     }
 }
 
-fn expr_to_list_value(expr: &Expr) -> Result<Value, String> {
-    match expr {
-        Expr::Integer32(n) => Ok(Value::Integer32(*n)),
-        Expr::Integer64(n) => Ok(Value::Integer64(*n)),
-        Expr::Float(f) => Ok(Value::Float(*f)),
-        Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::String(s) => Ok(Value::String(s.clone())),
-        Expr::Symbol(s) => Ok(Value::String(s.clone())),  // Symbols become strings when quoted
-        Expr::Nil => Ok(Value::Nil),
-        Expr::List(exprs) => {
-            let mut values = Vec::new();
-            for e in exprs {
-                values.push(expr_to_list_value(e)?);
-            }
-            Ok(Value::List(values))
-        }
-        Expr::Quote(inner) => expr_to_list_value(inner),
-        _ => Err(format!("Cannot convert expression to list value")),
-    }
-}
