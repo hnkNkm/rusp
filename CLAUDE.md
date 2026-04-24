@@ -4,82 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Rusp is a typed Lisp implementation in Rust that combines Lisp's S-expression syntax with Rust's type safety and ownership model. The project is in active development and currently provides a REPL for interactive evaluation of Lisp expressions with type checking.
+Rusp is a typed Lisp implemented in Rust (edition 2024): S-expression syntax with static type checking and inference. Currently ships a REPL; the project is pre-1.0 and evolving. See `README.md` (Japanese) for the user-facing language reference, and `docs/language-design.md` for the design spec.
+
+Dependencies are minimal — only `nom` 7.1 for parsing. No external runtime.
 
 ## Essential Commands
 
-### Build & Run
-- `cargo build` - Build the project in debug mode
-- `cargo build --release` - Build optimized release version
-- `cargo run` - Start the Rusp REPL
-- `cargo run --release` - Run REPL in release mode
+- `cargo run` — start the REPL
+- `cargo test` — run all tests; `cargo test [name]` for a single test; add `-- --nocapture` to see `println!` output
+- `cargo clippy` / `cargo fmt` — lint and format
 
-### Testing
-- `cargo test` - Run all tests
-- `cargo test [test_name]` - Run specific test by name
-- `cargo test -- --nocapture` - Run tests with println! output visible
-- `cargo test --lib` - Run library tests only
+## Architecture
 
-### Code Quality
-- `cargo clippy` - Run Clippy linter for Rust-specific lints
-- `cargo fmt` - Format code according to Rust standards
-- `cargo fmt --check` - Check formatting without modifying files
-- `cargo check` - Fast type-checking without producing binaries
+The REPL loop in `src/main.rs` runs every input through three sequential stages against persistent environments: **parse → type_check → eval**. A type error short-circuits before evaluation. Both a `TypeEnv` and a value `Environment` are kept across REPL iterations, so `let`/`defn` bindings persist.
 
-## Architecture Overview
+- `src/parser/` — nom-based S-expression parser (`expr.rs`), with a separate pass for type-annotation syntax (`types.rs`).
+- `src/ast.rs` — `Expr` and `Type` enums. Notable: numeric literals split into `Integer32`/`Integer64`/`Float`; `Let` has an optional `body` to encode let-in vs. top-level let; `Lambda` has optional return-type (inferred), `Defn` requires it.
+- `src/types.rs` — type checker + `TypeEnv`. Inference fills in `Type::Inferred` placeholders.
+- `src/eval.rs` — tree-walking evaluator. Assumes type-check has already passed.
+- `src/env.rs` — runtime `Value` definitions and `Environment` with parent-chain lexical scoping. Built-in arithmetic/comparison/logic ops and `print`/`println`/`type-of` are registered here as `Value::BuiltinFunction`, not special-cased in the evaluator.
 
-The codebase implements a typical interpreter pipeline:
+### Design points worth knowing before editing
 
-1. **Parser** (`src/parser/`) - Uses nom parser combinators to parse S-expressions
-   - `expr.rs` - Expression parsing logic
-   - `types.rs` - Type annotation parsing
-   - `error.rs` - Parse error definitions
-
-2. **AST** (`src/ast.rs`) - Abstract syntax tree representation
-   - Core expression types: Integer, Float, Bool, String, Symbol, List
-   - Control flow: If, Let, Defn, Lambda, Call
-   - Type annotations and inference support
-
-3. **Type System** (`src/types.rs`) - Static type checking
-   - Type environment management
-   - Type inference and checking
-   - Support for function types
-
-4. **Evaluator** (`src/eval.rs`) - Expression evaluation
-   - Environment-based evaluation
-   - Closure support with captured environments
-   - Built-in function support
-
-5. **Environment** (`src/env.rs`) - Runtime value storage
-   - Lexical scoping with environment chaining
-   - Support for functions, closures, and built-in operations
-
-6. **REPL** (`src/main.rs`) - Interactive evaluation loop
-   - Integrated type checking and evaluation
-   - Error reporting
-
-## Key Design Decisions
-
-- **nom for parsing**: Efficient parser combinator library for S-expression parsing
-- **Environment chaining**: Supports lexical scoping and closures
-- **Separate type and value environments**: Allows for static type checking before evaluation
-- **Built-in functions**: Arithmetic and comparison operations are implemented as built-in functions in the environment
-
-## Language Features (Planned)
-
-According to `docs/language-design.md`, the language aims to support:
-- S-expression syntax with Rust-like type annotations
-- Ownership and borrowing semantics
-- Pattern matching
-- Generics and traits
-- Async/await
-- Macros (syntax and procedural)
-
-## Development Workflow
-
-When making changes:
-1. Run `cargo clippy` to catch common mistakes and improve code quality
-2. Run `cargo fmt` to ensure consistent formatting
-3. Run `cargo test` to verify all tests pass
-4. Use `cargo check` for quick type-checking during development
-5. Test changes in the REPL with `cargo run`
+- **Type env and value env are separate structures** but mirror the same scoping discipline. When you add a binding form, update both (see how `Let`/`Defn` are handled in `types.rs` and `eval.rs`).
+- **Integer vs. float operators are distinct tokens** (`+` vs `+.`, etc.). There is no numeric coercion — this is enforced in the type checker, so evaluator code can assume operand types match.
+- **Closures capture the environment by cloning the chain** (see `env.rs`). If you touch closure semantics, be aware this is a value-semantics capture, not a reference.
+- **Tests live in `src/tests/`** (as a `#[cfg(test)] mod tests` inside the crate), not in the top-level `tests/` integration-test directory. `eval_tests.rs` is the largest and exercises the full parse→type→eval pipeline.

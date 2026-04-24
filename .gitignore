@@ -17,3 +17,6 @@ Thumbs.db
 
 # Debug
 *.pdb
+
+# direnv
+.direnv/
