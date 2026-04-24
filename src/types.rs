@@ -1,4 +1,4 @@
-use crate::ast::{Expr, Type};
+use crate::ast::{Expr, Pattern, Type};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -257,6 +257,35 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
             })
         }
         
+        Expr::Match { scrutinee, arms } => {
+            let scrutinee_type = type_check(scrutinee, env)?;
+
+            // Validate each arm. Bindings introduced by the pattern are
+            // visible only in that arm's body — we clone the env so
+            // sibling arms don't see them.
+            let mut result_type: Option<Type> = None;
+            for (pat, body) in arms {
+                check_pattern(pat, &scrutinee_type)?;
+                let mut arm_env = env.extend();
+                bind_pattern(pat, &scrutinee_type, &mut arm_env);
+                let body_type = type_check(body, &mut arm_env)?;
+                match &result_type {
+                    None => result_type = Some(body_type),
+                    Some(expected) => {
+                        if !types_match(expected, &body_type) {
+                            return Err(format!(
+                                "match arms must have the same type: {} vs {}",
+                                expected, body_type
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Parser guarantees at least one arm, but be defensive.
+            result_type.ok_or_else(|| "match has no arms".to_string())
+        }
+
         Expr::Call { func, args } => {
             let func_type = type_check(func, env)?;
             
@@ -554,6 +583,95 @@ fn expect_function(ty: &Type, op: &str) -> Result<(Vec<Type>, Type), String> {
     match ty {
         Type::Function { params, return_type } => Ok((params.clone(), *return_type.clone())),
         _ => Err(format!("{} expects a function, got {}", op, ty)),
+    }
+}
+
+/// Validate that `pattern` is compatible with `scrutinee` type.
+///
+/// Wildcards and variables match anything. Literal patterns must match
+/// their primitive type. `nil` and `cons` require the scrutinee to be
+/// a list type (or Inferred).
+fn check_pattern(pattern: &Pattern, scrutinee: &Type) -> Result<(), String> {
+    match pattern {
+        Pattern::Wildcard | Pattern::Variable(_) => Ok(()),
+        Pattern::LiteralI32(_) => {
+            if types_match(scrutinee, &Type::I32) {
+                Ok(())
+            } else {
+                Err(format!("pattern i32 does not match scrutinee type {}", scrutinee))
+            }
+        }
+        Pattern::LiteralI64(_) => {
+            if types_match(scrutinee, &Type::I64) {
+                Ok(())
+            } else {
+                Err(format!("pattern i64 does not match scrutinee type {}", scrutinee))
+            }
+        }
+        Pattern::LiteralF64(_) => {
+            if types_match(scrutinee, &Type::F64) {
+                Ok(())
+            } else {
+                Err(format!("pattern f64 does not match scrutinee type {}", scrutinee))
+            }
+        }
+        Pattern::LiteralBool(_) => {
+            if types_match(scrutinee, &Type::Bool) {
+                Ok(())
+            } else {
+                Err(format!("pattern bool does not match scrutinee type {}", scrutinee))
+            }
+        }
+        Pattern::LiteralString(_) => {
+            if types_match(scrutinee, &Type::String) {
+                Ok(())
+            } else {
+                Err(format!("pattern String does not match scrutinee type {}", scrutinee))
+            }
+        }
+        Pattern::Nil => match scrutinee {
+            Type::List(_) | Type::Inferred => Ok(()),
+            _ => Err(format!("nil pattern requires a list, got {}", scrutinee)),
+        },
+        Pattern::Cons(head, tail) => match scrutinee {
+            Type::List(elem) => {
+                check_pattern(head, elem)?;
+                check_pattern(tail, scrutinee)?;
+                Ok(())
+            }
+            Type::Inferred => {
+                check_pattern(head, &Type::Inferred)?;
+                check_pattern(tail, &Type::Inferred)?;
+                Ok(())
+            }
+            _ => Err(format!("cons pattern requires a list, got {}", scrutinee)),
+        },
+    }
+}
+
+/// Bind any variables introduced by `pattern` into `env` with appropriate
+/// types derived from `scrutinee`. Caller is responsible for scoping
+/// (typically via `env.extend()`).
+fn bind_pattern(pattern: &Pattern, scrutinee: &Type, env: &mut TypeEnv) {
+    match pattern {
+        Pattern::Wildcard
+        | Pattern::LiteralI32(_)
+        | Pattern::LiteralI64(_)
+        | Pattern::LiteralF64(_)
+        | Pattern::LiteralBool(_)
+        | Pattern::LiteralString(_)
+        | Pattern::Nil => {}
+        Pattern::Variable(name) => {
+            env.insert(name.clone(), scrutinee.clone());
+        }
+        Pattern::Cons(head, tail) => {
+            let (head_ty, tail_ty) = match scrutinee {
+                Type::List(elem) => (*elem.clone(), scrutinee.clone()),
+                _ => (Type::Inferred, Type::List(Box::new(Type::Inferred))),
+            };
+            bind_pattern(head, &head_ty, env);
+            bind_pattern(tail, &tail_ty, env);
+        }
     }
 }
 
