@@ -100,10 +100,11 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
                     }
                     "list" => {
                         // Evaluate all arguments and create a list
-                        let mut values = Vec::new();
-                        for i in 1..exprs.len() {
-                            values.push(eval(&exprs[i], env)?);
-                        }
+                        let values = exprs
+                            .iter()
+                            .skip(1)
+                            .map(|e| eval(e, env))
+                            .collect::<Result<Vec<_>, _>>()?;
                         Ok(Value::List(values))
                     }
                     "map" => {
@@ -128,7 +129,7 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
                         let items = list_items(&lst, "filter")?;
                         let mut result = Vec::new();
                         for item in items {
-                            match apply_function(&pred, &[item.clone()], env, None)? {
+                            match apply_function(&pred, std::slice::from_ref(&item), env, None)? {
                                 Value::Bool(true) => result.push(item),
                                 Value::Bool(false) => {}
                                 other => {
@@ -239,10 +240,10 @@ pub fn apply_function(
 
             // For recursion: if the function was called by name, make that
             // name resolvable inside the body too.
-            if let Some(name) = call_name {
-                if let Some(func_value) = env.get(name) {
-                    new_env.set(name.to_string(), func_value.clone());
-                }
+            if let Some(name) = call_name
+                && let Some(func_value) = env.get(name)
+            {
+                new_env.set(name.to_string(), func_value.clone());
             }
 
             for (param, arg) in params.iter().zip(args.iter()) {

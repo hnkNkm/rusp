@@ -6,9 +6,6 @@ pub enum ParseError {
     UnexpectedInput(String),
     UnexpectedEof,
     InvalidNumber(String),
-    InvalidString(String),
-    InvalidType(String),
-    UnmatchedParen,
     NomError(String),
 }
 
@@ -18,9 +15,6 @@ impl fmt::Display for ParseError {
             ParseError::UnexpectedInput(s) => write!(f, "Unexpected input: {}", s),
             ParseError::UnexpectedEof => write!(f, "Unexpected end of input"),
             ParseError::InvalidNumber(s) => write!(f, "Invalid number: {}", s),
-            ParseError::InvalidString(s) => write!(f, "Invalid string: {}", s),
-            ParseError::InvalidType(s) => write!(f, "Invalid type: {}", s),
-            ParseError::UnmatchedParen => write!(f, "Unmatched parenthesis"),
             ParseError::NomError(s) => write!(f, "Parse error: {}", s),
         }
     }
@@ -39,7 +33,7 @@ impl<'a> From<nom::Err<nom::error::Error<&'a str>>> for ParseError {
     }
 }
 
-impl<'a> From<nom::Err<ParseError>> for ParseError {
+impl From<nom::Err<ParseError>> for ParseError {
     fn from(err: nom::Err<ParseError>) -> Self {
         match err {
             nom::Err::Error(e) | nom::Err::Failure(e) => e,

@@ -241,13 +241,14 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
             
             let body_type = type_check(body, &mut new_env)?;
             
-            if let Some(rt) = return_type {
-                if &body_type != rt && rt != &Type::Inferred {
-                    return Err(format!(
-                        "Lambda return type mismatch: expected {}, got {}",
-                        rt, body_type
-                    ));
-                }
+            if let Some(rt) = return_type
+                && &body_type != rt
+                && rt != &Type::Inferred
+            {
+                return Err(format!(
+                    "Lambda return type mismatch: expected {}, got {}",
+                    rt, body_type
+                ));
             }
             
             Ok(Type::Function {
@@ -302,10 +303,10 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                                 }
                                 "nth" => {
                                     // nth returns the element type of the list (second arg)
-                                    if i == 1 {
-                                        if let Type::List(elem_type) = &arg_type {
-                                            actual_return_type = *elem_type.clone();
-                                        }
+                                    if i == 1
+                                        && let Type::List(elem_type) = &arg_type
+                                    {
+                                        actual_return_type = *elem_type.clone();
                                     }
                                 }
                                 _ => {

@@ -23,10 +23,12 @@ mod tests {
     }
     
     #[test]
+    // `3.14` here is just a sample float literal, not an approximation of π.
+    #[allow(clippy::approx_constant)]
     fn test_parse_floats() {
         let result = parse("3.14").unwrap();
         assert_eq!(result, Expr::Float(3.14));
-        
+
         let result = parse("-2.5").unwrap();
         assert_eq!(result, Expr::Float(-2.5));
     }

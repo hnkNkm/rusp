@@ -3,9 +3,9 @@ use crate::parser::types::parse_type_annotation;
 use nom::{
     branch::alt,
     bytes::complete::{escaped, tag, take_while1},
-    character::complete::{char, digit1, multispace0, multispace1, none_of},
+    character::complete::{char, digit1, multispace0, none_of},
     combinator::{map, opt, recognize, value},
-    multi::{many0, separated_list0},
+    multi::many0,
     sequence::{delimited, preceded, tuple},
     IResult,
 };
