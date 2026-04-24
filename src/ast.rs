@@ -35,7 +35,30 @@ pub enum Expr {
         func: Box<Expr>,
         args: Vec<Expr>,
     },
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<(Pattern, Expr)>,
+    },
     Nil,               // Empty list / nil
+}
+
+/// Patterns recognized by `match`.
+///
+/// Minimum set for this iteration: literals, wildcard, variable binding,
+/// `nil`, and `(cons head tail)` for list decomposition. Nested patterns
+/// (e.g. `(cons 0 rest)`) are supported because the head/tail fields are
+/// themselves Patterns.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pattern {
+    Wildcard,                               // _
+    Variable(String),                       // x — binds anything
+    LiteralI32(i32),
+    LiteralI64(i64),
+    LiteralF64(f64),
+    LiteralBool(bool),
+    LiteralString(String),
+    Nil,                                    // nil / ()
+    Cons(Box<Pattern>, Box<Pattern>),       // (cons head tail)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,7 +168,30 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
+            Expr::Match { scrutinee, arms } => {
+                write!(f, "(match {}", scrutinee)?;
+                for (pat, body) in arms {
+                    write!(f, " ({} {})", pat, body)?;
+                }
+                write!(f, ")")
+            }
             Expr::Nil => write!(f, "nil"),
+        }
+    }
+}
+
+impl fmt::Display for Pattern {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Pattern::Wildcard => write!(f, "_"),
+            Pattern::Variable(name) => write!(f, "{}", name),
+            Pattern::LiteralI32(n) => write!(f, "{}", n),
+            Pattern::LiteralI64(n) => write!(f, "{}", n),
+            Pattern::LiteralF64(n) => write!(f, "{}", n),
+            Pattern::LiteralBool(b) => write!(f, "{}", b),
+            Pattern::LiteralString(s) => write!(f, "\"{}\"", s),
+            Pattern::Nil => write!(f, "nil"),
+            Pattern::Cons(head, tail) => write!(f, "(cons {} {})", head, tail),
         }
     }
 }

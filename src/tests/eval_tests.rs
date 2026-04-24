@@ -904,4 +904,150 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    // ======================================================================
+    // Pattern matching
+    // ======================================================================
+
+    #[test]
+    fn test_eval_match_literal() {
+        let result = eval_str("(match 1 (1 \"one\") (2 \"two\") (_ \"other\"))").unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "one"),
+            _ => panic!("Expected String"),
+        }
+    }
+
+    #[test]
+    fn test_eval_match_wildcard_fallthrough() {
+        let result = eval_str("(match 99 (1 \"one\") (_ \"other\"))").unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "other"),
+            _ => panic!("Expected String"),
+        }
+    }
+
+    #[test]
+    fn test_eval_match_variable_binding() {
+        // Variable patterns bind the scrutinee; first arm always matches.
+        let result = eval_str("(match 42 (x (+ x 1)))").unwrap();
+        assert!(matches!(result, Value::Integer32(43)));
+    }
+
+    #[test]
+    fn test_eval_match_nil_on_empty_list() {
+        let result = eval_str("(match nil (nil \"empty\") (_ \"nonempty\"))").unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "empty"),
+            _ => panic!("Expected String"),
+        }
+    }
+
+    #[test]
+    fn test_eval_match_nil_on_list_literal() {
+        // (list) produces an empty list; nil pattern should match it.
+        let result =
+            eval_str("(match (list) (nil \"empty\") (_ \"nonempty\"))").unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "empty"),
+            _ => panic!("Expected String"),
+        }
+    }
+
+    #[test]
+    fn test_eval_match_cons_pattern() {
+        // Decompose list into head and tail; bind both.
+        let result =
+            eval_str("(match (list 1 2 3) ((cons h t) h) (nil 0))").unwrap();
+        assert!(matches!(result, Value::Integer32(1)));
+    }
+
+    #[test]
+    fn test_eval_match_cons_nested() {
+        // Pattern (cons 1 _) only matches lists starting with 1.
+        let result = eval_str(
+            "(match (list 1 2 3) ((cons 1 _) \"starts-with-one\") (_ \"other\"))",
+        )
+        .unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "starts-with-one"),
+            _ => panic!("Expected String"),
+        }
+
+        let result = eval_str(
+            "(match (list 2 3) ((cons 1 _) \"starts-with-one\") (_ \"other\"))",
+        )
+        .unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "other"),
+            _ => panic!("Expected String"),
+        }
+    }
+
+    #[test]
+    fn test_eval_match_no_arm_matches_error() {
+        // No wildcard arm, value doesn't match any literal.
+        let result = eval_str("(match 5 (1 \"one\") (2 \"two\"))");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_eval_match_recursive_sum() {
+        // Sum a list via recursion + match.
+        let program = "(defn sum [xs: _] -> i32 \
+             (match xs \
+               (nil 0) \
+               ((cons h t) (+ h (sum t)))))";
+        let expr = parser::parse(program).map_err(|e| e.to_string()).unwrap();
+        let mut env = Environment::new();
+        eval(&expr, &mut env).unwrap();
+
+        let call = parser::parse("(sum (list 1 2 3 4 5))")
+            .map_err(|e| e.to_string())
+            .unwrap();
+        let result = eval(&call, &mut env).unwrap();
+        assert!(matches!(result, Value::Integer32(15)));
+    }
+
+    #[test]
+    fn test_type_check_match_literal() {
+        let ty = type_check_str("(match 1 (1 \"one\") (_ \"other\"))").unwrap();
+        assert_eq!(ty, Type::String);
+    }
+
+    #[test]
+    fn test_type_check_match_variable_binding() {
+        // `x` is bound to the scrutinee's type (i32), so (+ x 1) type-checks.
+        let ty = type_check_str("(match 42 (x (+ x 1)))").unwrap();
+        assert_eq!(ty, Type::I32);
+    }
+
+    #[test]
+    fn test_type_check_match_cons_binding() {
+        // In (cons h t), h has the list's element type, t has the list type.
+        let ty = type_check_str("(match (list 1 2 3) ((cons h _) h) (nil 0))").unwrap();
+        assert_eq!(ty, Type::I32);
+    }
+
+    #[test]
+    fn test_type_check_match_arms_must_agree() {
+        // Arms return String and i32 — should error.
+        let result = type_check_str("(match 1 (1 \"one\") (_ 2))");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("same type"));
+    }
+
+    #[test]
+    fn test_type_check_match_literal_type_mismatch() {
+        // Scrutinee is i32 but pattern is a bool literal.
+        let result = type_check_str("(match 1 (true 0) (_ 1))");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_type_check_match_cons_requires_list() {
+        // Scrutinee is an i32; cons pattern is a list-only pattern.
+        let result = type_check_str("(match 1 ((cons h t) h) (_ 0))");
+        assert!(result.is_err());
+    }
 }

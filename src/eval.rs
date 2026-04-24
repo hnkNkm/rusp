@@ -1,4 +1,4 @@
-use crate::ast::Expr;
+use crate::ast::{Expr, Pattern};
 use crate::env::{Environment, Value};
 
 pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
@@ -66,6 +66,17 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
             })
         }
         
+        Expr::Match { scrutinee, arms } => {
+            let value = eval(scrutinee, env)?;
+            for (pat, body) in arms {
+                let mut new_env = env.extend();
+                if pattern_match(pat, &value, &mut new_env) {
+                    return eval(body, &mut new_env);
+                }
+            }
+            Err(format!("No match arm matched value: {}", value))
+        }
+
         Expr::Call { func, args } => {
             let func_val = eval(func, env)?;
             let arg_vals: Result<Vec<_>, _> = args.iter().map(|a| eval(a, env)).collect();
@@ -201,6 +212,36 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
                 }, env)
             }
         }
+    }
+}
+
+/// Try to match `value` against `pattern`, binding any captured variables
+/// into `env`. Returns true on success. On failure the caller should
+/// discard `env` (bindings already written are considered scratch).
+fn pattern_match(pattern: &Pattern, value: &Value, env: &mut Environment) -> bool {
+    match (pattern, value) {
+        (Pattern::Wildcard, _) => true,
+        (Pattern::Variable(name), v) => {
+            env.set(name.clone(), v.clone());
+            true
+        }
+        (Pattern::LiteralI32(a), Value::Integer32(b)) => a == b,
+        (Pattern::LiteralI64(a), Value::Integer64(b)) => a == b,
+        (Pattern::LiteralF64(a), Value::Float(b)) => a == b,
+        (Pattern::LiteralBool(a), Value::Bool(b)) => a == b,
+        (Pattern::LiteralString(a), Value::String(b)) => a == b,
+        (Pattern::Nil, Value::Nil) => true,
+        (Pattern::Nil, Value::List(items)) => items.is_empty(),
+        (Pattern::Cons(head_pat, tail_pat), Value::List(items)) if !items.is_empty() => {
+            let head = items[0].clone();
+            let tail = if items.len() == 1 {
+                Value::Nil
+            } else {
+                Value::List(items[1..].to_vec())
+            };
+            pattern_match(head_pat, &head, env) && pattern_match(tail_pat, &tail, env)
+        }
+        _ => false,
     }
 }
 

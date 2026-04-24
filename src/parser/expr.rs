@@ -3,7 +3,7 @@ use crate::parser::types::parse_type_annotation;
 use nom::{
     branch::alt,
     bytes::complete::{escaped, tag, take_while1},
-    character::complete::{char, digit1, multispace0, none_of},
+    character::complete::{char, digit1, multispace0, multispace1, none_of},
     combinator::{map, opt, recognize, value},
     multi::many0,
     sequence::{delimited, preceded, tuple},
@@ -133,6 +133,7 @@ fn parse_list(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseErr
                 Expr::Symbol(s) if s == "let" => parse_let_expr(input),
                 Expr::Symbol(s) if s == "defn" => parse_defn_expr(input),
                 Expr::Symbol(s) if s == "fn" || s == "lambda" => parse_lambda_expr(input),
+                Expr::Symbol(s) if s == "match" => parse_match_expr(input),
                 _ => {
                     let (input, _) = multispace0(input)?;
                     let (input, rest) = many0(preceded(multispace0, parse_expr))(input)?;
@@ -313,6 +314,104 @@ fn parse_symbol_name(input: &str) -> IResult<&str, String, crate::parser::error:
     let (input, s) = take_while1(|c: char| {
         c.is_alphanumeric() || "_-".contains(c)
     })(input)?;
-    
+
     Ok((input, s.to_string()))
+}
+
+// === Pattern matching ===
+
+/// Parse `(match <expr> (<pat> <body>) ...)`.
+/// Caller has already consumed the leading `(` and the `match` keyword.
+fn parse_match_expr(input: &str) -> IResult<&str, Expr, crate::parser::error::ParseError> {
+    let (input, _) = multispace0(input)?;
+    let (input, scrutinee) = parse_expr(input)?;
+
+    // One or more arms, each a `(pattern body)` S-expression.
+    let (input, arms) = many0(preceded(multispace0, parse_match_arm))(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+
+    if arms.is_empty() {
+        return Err(nom::Err::Failure(
+            crate::parser::error::ParseError::UnexpectedInput(
+                "match requires at least one arm".to_string(),
+            ),
+        ));
+    }
+
+    Ok((
+        input,
+        Expr::Match {
+            scrutinee: Box::new(scrutinee),
+            arms,
+        },
+    ))
+}
+
+fn parse_match_arm(
+    input: &str,
+) -> IResult<&str, (crate::ast::Pattern, Expr), crate::parser::error::ParseError> {
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, pat) = parse_pattern(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, body) = parse_expr(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, (pat, body)))
+}
+
+fn parse_pattern(
+    input: &str,
+) -> IResult<&str, crate::ast::Pattern, crate::parser::error::ParseError> {
+    let (input, _) = multispace0(input)?;
+    alt((parse_cons_pattern, parse_atom_pattern))(input)
+}
+
+/// `(cons <head-pat> <tail-pat>)` — nested patterns supported.
+fn parse_cons_pattern(
+    input: &str,
+) -> IResult<&str, crate::ast::Pattern, crate::parser::error::ParseError> {
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = tag("cons")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, head) = parse_pattern(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, tail) = parse_pattern(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((
+        input,
+        crate::ast::Pattern::Cons(Box::new(head), Box::new(tail)),
+    ))
+}
+
+/// Atom-level pattern: literals, wildcard, nil, or variable binding.
+///
+/// We reuse the expression parsers for literals — they won't commit to a
+/// list context because atoms don't start with `(`.
+fn parse_atom_pattern(
+    input: &str,
+) -> IResult<&str, crate::ast::Pattern, crate::parser::error::ParseError> {
+    let (input, e) = parse_atom(input)?;
+    let pat = match e {
+        Expr::Bool(b) => crate::ast::Pattern::LiteralBool(b),
+        Expr::Integer32(n) => crate::ast::Pattern::LiteralI32(n),
+        Expr::Integer64(n) => crate::ast::Pattern::LiteralI64(n),
+        Expr::Float(n) => crate::ast::Pattern::LiteralF64(n),
+        Expr::String(s) => crate::ast::Pattern::LiteralString(s),
+        Expr::Nil => crate::ast::Pattern::Nil,
+        Expr::Symbol(s) if s == "_" => crate::ast::Pattern::Wildcard,
+        Expr::Symbol(s) => crate::ast::Pattern::Variable(s),
+        other => {
+            return Err(nom::Err::Failure(
+                crate::parser::error::ParseError::UnexpectedInput(format!(
+                    "not a valid atom pattern: {}",
+                    other
+                )),
+            ));
+        }
+    };
+    Ok((input, pat))
 }

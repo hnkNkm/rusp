@@ -219,6 +219,36 @@ Type 'exit' or press Ctrl+C to quit
 (11 21 31): List<i32>
 ```
 
+### パターンマッチング
+`match` 式でスカラーやリストを構造分解できます。対応パターン:
+
+- リテラル (`1`, `true`, `"foo"` など) — 値が等しいときにマッチ
+- `_` — ワイルドカード（何にでもマッチし、束縛しない）
+- 変数名 — 何にでもマッチし、その名前で束縛
+- `nil` — 空リスト (`nil` または `(list)`) にマッチ
+- `(cons head tail)` — 非空リストを先頭と残りに分解（入れ子可）
+
+```lisp
+> (match 1 (1 "one") (2 "two") (_ "other"))
+"one": String
+
+; head/tail への束縛
+> (match (list 10 20 30) ((cons h t) h) (nil 0))
+10: i32
+
+; 入れ子パターン: 先頭が 1 のリストだけマッチ
+> (match (list 1 2 3) ((cons 1 _) "starts-with-one") (_ "other"))
+"starts-with-one": String
+
+; リスト総和を再帰 + match で
+> (defn sum [xs: _] -> i32
+    (match xs
+      (nil 0)
+      ((cons h t) (+ h (sum t)))))
+> (sum (list 1 2 3 4 5))
+15: i32
+```
+
 ## プロジェクト構造
 
 ```
@@ -261,7 +291,7 @@ Error: 99999999999999999999 is out of i32 range
 ### Phase 2 (中期)
 - [x] リスト型 (`List<T>`) と基本操作
 - [x] 高階関数 (`map`, `filter`, `fold`)
-- [ ] パターンマッチング
+- [x] パターンマッチング (リテラル/変数/ワイルドカード/`nil`/`cons`)
 - [ ] 構造体とレコード型
 - [ ] モジュールシステム
 
