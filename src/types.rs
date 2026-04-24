@@ -367,6 +367,107 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                         }
                         Ok(Type::List(Box::new(first_type)))
                     }
+                    "map" => {
+                        // (map f lst) : List<B> where f : A -> B and lst : List<A>
+                        if exprs.len() != 3 {
+                            return Err("map requires 2 arguments: (map f lst)".to_string());
+                        }
+                        let f_type = type_check(&exprs[1], env)?;
+                        let lst_type = type_check(&exprs[2], env)?;
+                        let elem_type = expect_list_elem(&lst_type, "map")?;
+                        let (param_types, ret_type) = expect_function(&f_type, "map")?;
+                        if param_types.len() != 1 {
+                            return Err(format!(
+                                "map requires a unary function, got arity {}",
+                                param_types.len()
+                            ));
+                        }
+                        if !types_match(&param_types[0], &elem_type) {
+                            return Err(format!(
+                                "map function parameter type {} does not match list element type {}",
+                                param_types[0], elem_type
+                            ));
+                        }
+                        // If the function's return type is unresolved, the list
+                        // element type is the best guess we have.
+                        let result_elem = if ret_type == Type::Inferred {
+                            elem_type
+                        } else {
+                            ret_type
+                        };
+                        Ok(Type::List(Box::new(result_elem)))
+                    }
+                    "filter" => {
+                        // (filter pred lst) : List<A> where pred : A -> bool
+                        if exprs.len() != 3 {
+                            return Err(
+                                "filter requires 2 arguments: (filter pred lst)".to_string()
+                            );
+                        }
+                        let pred_type = type_check(&exprs[1], env)?;
+                        let lst_type = type_check(&exprs[2], env)?;
+                        let elem_type = expect_list_elem(&lst_type, "filter")?;
+                        let (param_types, ret_type) = expect_function(&pred_type, "filter")?;
+                        if param_types.len() != 1 {
+                            return Err(format!(
+                                "filter requires a unary predicate, got arity {}",
+                                param_types.len()
+                            ));
+                        }
+                        if !types_match(&param_types[0], &elem_type) {
+                            return Err(format!(
+                                "filter predicate parameter type {} does not match list element type {}",
+                                param_types[0], elem_type
+                            ));
+                        }
+                        if !types_match(&ret_type, &Type::Bool) {
+                            return Err(format!(
+                                "filter predicate must return bool, got {}",
+                                ret_type
+                            ));
+                        }
+                        Ok(Type::List(Box::new(elem_type)))
+                    }
+                    "fold" => {
+                        // (fold f init lst) : B where f : B -> A -> B, init : B, lst : List<A>
+                        if exprs.len() != 4 {
+                            return Err(
+                                "fold requires 3 arguments: (fold f init lst)".to_string()
+                            );
+                        }
+                        let f_type = type_check(&exprs[1], env)?;
+                        let init_type = type_check(&exprs[2], env)?;
+                        let lst_type = type_check(&exprs[3], env)?;
+                        let elem_type = expect_list_elem(&lst_type, "fold")?;
+                        let (param_types, ret_type) = expect_function(&f_type, "fold")?;
+                        if param_types.len() != 2 {
+                            return Err(format!(
+                                "fold requires a binary function, got arity {}",
+                                param_types.len()
+                            ));
+                        }
+                        if !types_match(&param_types[0], &init_type) {
+                            return Err(format!(
+                                "fold accumulator type {} does not match init type {}",
+                                param_types[0], init_type
+                            ));
+                        }
+                        if !types_match(&param_types[1], &elem_type) {
+                            return Err(format!(
+                                "fold element parameter type {} does not match list element type {}",
+                                param_types[1], elem_type
+                            ));
+                        }
+                        if !types_match(&ret_type, &init_type) {
+                            return Err(format!(
+                                "fold return type {} does not match accumulator type {}",
+                                ret_type, init_type
+                            ));
+                        }
+                        // Prefer the concrete init type over any Inferred from
+                        // the function's return slot.
+                        Ok(init_type)
+                    }
                     "let" => {
                         if exprs.len() < 3 {
                             return Err("Let requires at least 2 arguments".to_string());
@@ -435,6 +536,23 @@ pub fn parse_type(s: &str) -> Result<Type, String> {
         "String" => Ok(Type::String),
         "_" => Ok(Type::Inferred),
         _ => Err(format!("Unknown type: {}", s)),
+    }
+}
+
+/// Unwrap a `List<T>` type to its element type, or normalize `Nil`-shaped
+/// cases. Returns an error naming the offending operation for clarity.
+fn expect_list_elem(ty: &Type, op: &str) -> Result<Type, String> {
+    match ty {
+        Type::List(elem) => Ok(*elem.clone()),
+        _ => Err(format!("{} expects a list, got {}", op, ty)),
+    }
+}
+
+/// Unwrap a `Function` type, returning `(params, return_type)`.
+fn expect_function(ty: &Type, op: &str) -> Result<(Vec<Type>, Type), String> {
+    match ty {
+        Type::Function { params, return_type } => Ok((params.clone(), *return_type.clone())),
+        _ => Err(format!("{} expects a function, got {}", op, ty)),
     }
 }
 

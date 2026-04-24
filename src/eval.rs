@@ -70,46 +70,15 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
             let func_val = eval(func, env)?;
             let arg_vals: Result<Vec<_>, _> = args.iter().map(|a| eval(a, env)).collect();
             let arg_vals = arg_vals?;
-            
-            match func_val {
-                Value::Function { params, body, env: func_env } => {
-                    if params.len() != arg_vals.len() {
-                        return Err(format!(
-                            "Wrong number of arguments: expected {}, got {}",
-                            params.len(),
-                            arg_vals.len()
-                        ));
-                    }
-                    
-                    // For recursive functions, we need to check if the function name is in the
-                    // current expression and add it to the new environment
-                    let mut new_env = func_env.extend();
-                    
-                    // Check if this is a named function call (for recursion)
-                    if let Expr::Symbol(func_name) = &**func {
-                        // If we have the function in the current environment, add it to the new one
-                        if let Some(func_value) = env.get(func_name) {
-                            new_env.set(func_name.clone(), func_value.clone());
-                        }
-                    }
-                    
-                    for (param, arg) in params.iter().zip(arg_vals.iter()) {
-                        new_env.set(param.clone(), arg.clone());
-                    }
-                    
-                    eval(&body, &mut new_env)
-                }
-                Value::BuiltinFunction { arity, func, name } => {
-                    if arg_vals.len() != arity {
-                        return Err(format!(
-                            "Wrong number of arguments for {}: expected {}, got {}",
-                            name, arity, arg_vals.len()
-                        ));
-                    }
-                    func(&arg_vals)
-                }
-                _ => Err(format!("Cannot call non-function value: {}", func_val)),
-            }
+
+            // Pass the call-site name (if any) so apply_function can rebind
+            // the function for recursive calls.
+            let call_name = if let Expr::Symbol(name) = &**func {
+                Some(name.as_str())
+            } else {
+                None
+            };
+            apply_function(&func_val, &arg_vals, env, call_name)
         }
         
         Expr::List(exprs) => {
@@ -136,6 +105,60 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
                             values.push(eval(&exprs[i], env)?);
                         }
                         Ok(Value::List(values))
+                    }
+                    "map" => {
+                        if exprs.len() != 3 {
+                            return Err("map requires 2 arguments: (map f lst)".to_string());
+                        }
+                        let f = eval(&exprs[1], env)?;
+                        let lst = eval(&exprs[2], env)?;
+                        let items = list_items(&lst, "map")?;
+                        let mut result = Vec::with_capacity(items.len());
+                        for item in items {
+                            result.push(apply_function(&f, &[item], env, None)?);
+                        }
+                        Ok(Value::List(result))
+                    }
+                    "filter" => {
+                        if exprs.len() != 3 {
+                            return Err("filter requires 2 arguments: (filter pred lst)".to_string());
+                        }
+                        let pred = eval(&exprs[1], env)?;
+                        let lst = eval(&exprs[2], env)?;
+                        let items = list_items(&lst, "filter")?;
+                        let mut result = Vec::new();
+                        for item in items {
+                            match apply_function(&pred, &[item.clone()], env, None)? {
+                                Value::Bool(true) => result.push(item),
+                                Value::Bool(false) => {}
+                                other => {
+                                    return Err(format!(
+                                        "filter predicate must return bool, got {}",
+                                        other.type_name()
+                                    ))
+                                }
+                            }
+                        }
+                        if result.is_empty() {
+                            Ok(Value::Nil)
+                        } else {
+                            Ok(Value::List(result))
+                        }
+                    }
+                    "fold" => {
+                        if exprs.len() != 4 {
+                            return Err(
+                                "fold requires 3 arguments: (fold f init lst)".to_string()
+                            );
+                        }
+                        let f = eval(&exprs[1], env)?;
+                        let mut acc = eval(&exprs[2], env)?;
+                        let lst = eval(&exprs[3], env)?;
+                        let items = list_items(&lst, "fold")?;
+                        for item in items {
+                            acc = apply_function(&f, &[acc, item], env, None)?;
+                        }
+                        Ok(acc)
                     }
                     "let" => {
                         if exprs.len() < 3 {
@@ -180,3 +203,63 @@ pub fn eval(expr: &Expr, env: &mut Environment) -> Result<Value, String> {
     }
 }
 
+/// Normalize a list-ish Value into an owned Vec<Value>.
+/// `Nil` is treated as the empty list. Any other value is a type error
+/// surfaced with the caller's operation name for a clear message.
+fn list_items(value: &Value, op: &str) -> Result<Vec<Value>, String> {
+    match value {
+        Value::List(items) => Ok(items.clone()),
+        Value::Nil => Ok(Vec::new()),
+        other => Err(format!("{} expects a list, got {}", op, other.type_name())),
+    }
+}
+
+/// Apply a function value to pre-evaluated arguments.
+///
+/// `call_name` is the symbol the function was looked up under at the call
+/// site, if any. It's used to rebind the function into its own closure
+/// environment so direct recursion works.
+pub fn apply_function(
+    func_val: &Value,
+    args: &[Value],
+    env: &Environment,
+    call_name: Option<&str>,
+) -> Result<Value, String> {
+    match func_val {
+        Value::Function { params, body, env: func_env } => {
+            if params.len() != args.len() {
+                return Err(format!(
+                    "Wrong number of arguments: expected {}, got {}",
+                    params.len(),
+                    args.len()
+                ));
+            }
+
+            let mut new_env = func_env.extend();
+
+            // For recursion: if the function was called by name, make that
+            // name resolvable inside the body too.
+            if let Some(name) = call_name {
+                if let Some(func_value) = env.get(name) {
+                    new_env.set(name.to_string(), func_value.clone());
+                }
+            }
+
+            for (param, arg) in params.iter().zip(args.iter()) {
+                new_env.set(param.clone(), arg.clone());
+            }
+
+            eval(body, &mut new_env)
+        }
+        Value::BuiltinFunction { arity, func, name } => {
+            if args.len() != *arity {
+                return Err(format!(
+                    "Wrong number of arguments for {}: expected {}, got {}",
+                    name, arity, args.len()
+                ));
+            }
+            func(args)
+        }
+        _ => Err(format!("Cannot call non-function value: {}", func_val)),
+    }
+}

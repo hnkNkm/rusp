@@ -746,4 +746,162 @@ mod tests {
             return_type: Box::new(Type::List(Box::new(Type::I32))),
         });
     }
+
+    // Higher-order function tests: map / filter / fold
+    //
+    // These exercise both the evaluator (function values are invoked inside
+    // the special form) and the type checker (which threads the element type
+    // through the function signature).
+
+    #[test]
+    fn test_eval_map_with_lambda() {
+        let mut env = Environment::new();
+        let expr = parser::parse("(map (fn [x: i32] -> i32 (* x x)) (list 1 2 3))").unwrap();
+        let result = eval(&expr, &mut env).unwrap();
+        match result {
+            Value::List(values) => {
+                assert_eq!(values.len(), 3);
+                assert!(matches!(values[0], Value::Integer32(1)));
+                assert!(matches!(values[1], Value::Integer32(4)));
+                assert!(matches!(values[2], Value::Integer32(9)));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+
+    #[test]
+    fn test_eval_map_with_defn() {
+        // map over a named function; also exercises the function-name lookup
+        // path in apply_function.
+        let mut env = Environment::new();
+        eval(
+            &parser::parse("(defn inc [x: i32] -> i32 (+ x 1))").unwrap(),
+            &mut env,
+        )
+        .unwrap();
+        let result = eval(
+            &parser::parse("(map inc (list 10 20 30))").unwrap(),
+            &mut env,
+        )
+        .unwrap();
+        match result {
+            Value::List(values) => {
+                assert_eq!(values.len(), 3);
+                assert!(matches!(values[0], Value::Integer32(11)));
+                assert!(matches!(values[1], Value::Integer32(21)));
+                assert!(matches!(values[2], Value::Integer32(31)));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+
+    #[test]
+    fn test_eval_filter() {
+        let mut env = Environment::new();
+        let expr = parser::parse(
+            "(filter (fn [x: i32] -> bool (> x 2)) (list 1 2 3 4 5))",
+        )
+        .unwrap();
+        let result = eval(&expr, &mut env).unwrap();
+        match result {
+            Value::List(values) => {
+                assert_eq!(values.len(), 3);
+                assert!(matches!(values[0], Value::Integer32(3)));
+                assert!(matches!(values[1], Value::Integer32(4)));
+                assert!(matches!(values[2], Value::Integer32(5)));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+
+    #[test]
+    fn test_eval_filter_empty_result_is_nil() {
+        let result = eval_str(
+            "(filter (fn [x: i32] -> bool (> x 100)) (list 1 2 3))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Nil));
+    }
+
+    #[test]
+    fn test_eval_fold_sum() {
+        let result = eval_str(
+            "(fold (fn [acc: i32 x: i32] -> i32 (+ acc x)) 0 (list 1 2 3 4 5))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(15)));
+    }
+
+    #[test]
+    fn test_eval_fold_empty_list_returns_init() {
+        let result = eval_str(
+            "(fold (fn [acc: i32 x: i32] -> i32 (+ acc x)) 42 nil)",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(42)));
+    }
+
+    #[test]
+    fn test_type_check_map() {
+        let ty = type_check_str(
+            "(map (fn [x: i32] -> i32 (* x x)) (list 1 2 3))",
+        )
+        .unwrap();
+        assert_eq!(ty, Type::List(Box::new(Type::I32)));
+    }
+
+    #[test]
+    fn test_type_check_map_changes_element_type() {
+        // i32 -> bool, so result is List<bool>
+        let ty = type_check_str(
+            "(map (fn [x: i32] -> bool (> x 0)) (list 1 -2 3))",
+        )
+        .unwrap();
+        assert_eq!(ty, Type::List(Box::new(Type::Bool)));
+    }
+
+    #[test]
+    fn test_type_check_filter() {
+        let ty = type_check_str(
+            "(filter (fn [x: i32] -> bool (> x 0)) (list 1 -2 3))",
+        )
+        .unwrap();
+        assert_eq!(ty, Type::List(Box::new(Type::I32)));
+    }
+
+    #[test]
+    fn test_type_check_fold() {
+        let ty = type_check_str(
+            "(fold (fn [acc: i32 x: i32] -> i32 (+ acc x)) 0 (list 1 2 3))",
+        )
+        .unwrap();
+        assert_eq!(ty, Type::I32);
+    }
+
+    #[test]
+    fn test_type_check_map_wrong_function_arity_rejected() {
+        let result = type_check_str(
+            "(map (fn [x: i32 y: i32] -> i32 (+ x y)) (list 1 2 3))",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unary function"));
+    }
+
+    #[test]
+    fn test_type_check_filter_non_bool_predicate_rejected() {
+        let result = type_check_str(
+            "(filter (fn [x: i32] -> i32 x) (list 1 2 3))",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("bool"));
+    }
+
+    #[test]
+    fn test_type_check_fold_mismatched_acc_rejected() {
+        // init is i32 but function returns bool — incompatible accumulator.
+        let result = type_check_str(
+            "(fold (fn [acc: i32 x: i32] -> bool (> acc x)) 0 (list 1 2 3))",
+        );
+        assert!(result.is_err());
+    }
 }

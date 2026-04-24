@@ -90,6 +90,11 @@ Type 'exit' or press Ctrl+C to quit
 - `append` : 2つのリストを連結
 - `nth` : n番目の要素を取得 (0-indexed)
 
+#### 高階関数
+- `map` : `(map f lst)` — 各要素に `f` を適用した新しいリスト
+- `filter` : `(filter pred lst)` — 述語 `pred` が真になる要素だけを集めた新しいリスト
+- `fold` : `(fold f init lst)` — 左畳み込み (`f : acc -> elem -> acc`)
+
 ## 構文例
 
 ### 基本的な計算
@@ -194,6 +199,26 @@ Type 'exit' or press Ctrl+C to quit
 15: i32
 ```
 
+### 高階関数
+```lisp
+; map: 各要素を2乗
+> (map (fn [x: i32] -> i32 (* x x)) (list 1 2 3))
+(1 4 9): List<i32>
+
+; filter: 正の数だけ残す
+> (filter (fn [x: i32] -> bool (> x 0)) (list 1 -2 3 -4))
+(1 3): List<i32>
+
+; fold: 畳み込みで総和
+> (fold (fn [acc: i32 x: i32] -> i32 (+ acc x)) 0 (list 1 2 3 4 5))
+15: i32
+
+; defn で定義した関数も渡せる
+> (defn inc [x: i32] -> i32 (+ x 1))
+> (map inc (list 10 20 30))
+(11 21 31): List<i32>
+```
+
 ## プロジェクト構造
 
 ```
@@ -235,7 +260,7 @@ Error: 99999999999999999999 is out of i32 range
 
 ### Phase 2 (中期)
 - [x] リスト型 (`List<T>`) と基本操作
-- [ ] 高階関数 (`map`, `filter`, `fold`)
+- [x] 高階関数 (`map`, `filter`, `fold`)
 - [ ] パターンマッチング
 - [ ] 構造体とレコード型
 - [ ] モジュールシステム
