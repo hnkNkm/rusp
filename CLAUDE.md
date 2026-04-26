@@ -6,13 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rusp is a typed Lisp implemented in Rust (edition 2024): S-expression syntax with static type checking and inference. Currently ships a REPL; the project is pre-1.0 and evolving. See `README.md` (Japanese) for the user-facing language reference, and `docs/language-design.md` for the design spec.
 
-Dependencies are minimal — only `nom` 7.1 for parsing. No external runtime.
+Dependencies: `nom` 7.1 (parser) and `inkwell` 0.9 + LLVM 18 (codegen backend). The `nix develop` shell sets `LLVM_SYS_181_PREFIX`; outside the shell, `cargo` won't find LLVM.
 
 ## Essential Commands
 
-- `cargo run` — start the REPL
-- `cargo test` — run all tests; `cargo test [name]` for a single test; add `-- --nocapture` to see `println!` output
-- `cargo clippy` / `cargo fmt` — lint and format
+- `nix develop --command cargo run` — start the REPL
+- `nix develop --command cargo run -- --llvm` — REPL with LLVM JIT backend
+- `nix develop --command cargo run -- build FILE --emit ll|obj` — AOT compile to `FILE.ll` / `FILE.o`
+- `nix develop --command cargo test` — run all tests; `cargo test [name]` for a single test; add `-- --nocapture` to see `println!` output
+- `nix develop --command cargo clippy --all-targets -- -D warnings` / `cargo fmt` — lint and format
 
 ## Architecture
 
@@ -23,6 +25,7 @@ The REPL loop in `src/main.rs` runs every input through three sequential stages 
 - `src/types.rs` — type checker + `TypeEnv`. Inference fills in `Type::Inferred` placeholders.
 - `src/eval.rs` — tree-walking evaluator. Assumes type-check has already passed.
 - `src/env.rs` — runtime `Value` definitions and `Environment` with parent-chain lexical scoping. Built-in arithmetic/comparison/logic ops and `print`/`println`/`type-of` are registered here as `Value::BuiltinFunction`, not special-cased in the evaluator.
+- `src/codegen/` — LLVM backend (MVP). `jit.rs` covers JIT (`jit_eval_*_program`) including the shared `emit_defn` and `ExprCg` (per-invocation codegen helper carrying `module`, `builder`, `env`, `functions`, and a `lambda_counter`). `aot.rs` reuses `emit_defn` to produce a textual LLVM IR string or a native object file. The `EmitVal` enum (`Int` / `Float` / `FuncRef`) discriminates SSA value kinds; `FuncRef` has no boundary representation and is rejected at returns. MVP scope is scalar types + functions + recursion; `List`, `match`, and `String` are out of scope.
 
 ### Design points worth knowing before editing
 

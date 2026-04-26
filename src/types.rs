@@ -11,6 +11,12 @@ pub struct TypeEnv {
     pub refinements: HashMap<String, Type>,
 }
 
+impl Default for TypeEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeEnv {
     pub fn new() -> Self {
         let mut types = HashMap::new();
