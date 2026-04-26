@@ -133,11 +133,106 @@ mod tests {
         );
     }
 
+    // ----------- Step 4: bool, comparison, if, and/or/not -----------
+
+    fn jit_bool(input: &str) -> Result<bool, String> {
+        let ast = parser::parse(input).map_err(|e| e.to_string())?;
+        codegen::jit_eval_bool(&ast)
+    }
+
+    #[test]
+    fn jit_bool_literal() {
+        assert!(jit_bool("true").unwrap());
+        assert!(!jit_bool("false").unwrap());
+    }
+
+    #[test]
+    fn jit_i32_comparison() {
+        assert!(jit_bool("(= 1 1)").unwrap());
+        assert!(!jit_bool("(= 1 2)").unwrap());
+        assert!(jit_bool("(< 1 2)").unwrap());
+        assert!(!jit_bool("(< 2 1)").unwrap());
+        assert!(jit_bool("(> 5 3)").unwrap());
+        assert!(jit_bool("(<= 3 3)").unwrap());
+        assert!(jit_bool("(>= 4 3)").unwrap());
+        // Negative numbers (signed comparison).
+        assert!(jit_bool("(< -5 0)").unwrap());
+    }
+
+    #[test]
+    fn jit_i64_comparison() {
+        // Operands are both > i32::MAX so the parser tags them as i64,
+        // exercising the SLT codegen path on i64.
+        assert!(jit_bool("(< 3000000000 4000000000)").unwrap());
+        assert!(!jit_bool("(= 3000000000 4000000000)").unwrap());
+    }
+
+    #[test]
+    fn jit_if_simple() {
+        assert_eq!(jit_i32("(if true 10 20)").unwrap(), 10);
+        assert_eq!(jit_i32("(if false 10 20)").unwrap(), 20);
+        // Condition that is itself a comparison.
+        assert_eq!(jit_i32("(if (= 1 1) 10 20)").unwrap(), 10);
+        assert_eq!(jit_i32("(if (< 5 1) 10 20)").unwrap(), 20);
+    }
+
+    #[test]
+    fn jit_if_nested() {
+        // Nested if exercises that emit_if captures the *end* block of
+        // each arm, not the start, so phi sources stay correct.
+        let src = "(if (< 0 1) (if (< 1 2) 1 2) 3)";
+        assert_eq!(jit_i32(src).unwrap(), 1);
+        let src2 = "(if (< 0 1) (if (> 1 2) 1 2) 3)";
+        assert_eq!(jit_i32(src2).unwrap(), 2);
+    }
+
+    #[test]
+    fn jit_if_returning_bool() {
+        // The merge phi should be i1 here.
+        assert!(jit_bool("(if true (= 1 1) (= 1 2))").unwrap());
+        assert!(!jit_bool("(if false (= 1 1) (= 1 2))").unwrap());
+    }
+
+    #[test]
+    fn jit_and_basic() {
+        assert!(jit_bool("(and true true)").unwrap());
+        assert!(!jit_bool("(and true false)").unwrap());
+        assert!(!jit_bool("(and false true)").unwrap());
+        assert!(!jit_bool("(and false false)").unwrap());
+        // Variadic and: left-fold.
+        assert!(jit_bool("(and true true true)").unwrap());
+        assert!(!jit_bool("(and true true false)").unwrap());
+    }
+
+    #[test]
+    fn jit_or_basic() {
+        assert!(jit_bool("(or true false)").unwrap());
+        assert!(jit_bool("(or false true)").unwrap());
+        assert!(!jit_bool("(or false false)").unwrap());
+        assert!(jit_bool("(or false false true)").unwrap());
+    }
+
+    #[test]
+    fn jit_not_basic() {
+        assert!(!jit_bool("(not true)").unwrap());
+        assert!(jit_bool("(not false)").unwrap());
+        assert!(jit_bool("(not (= 1 2))").unwrap());
+    }
+
+    #[test]
+    fn jit_logical_with_comparison() {
+        // Compose comparisons + logical ops in one expression.
+        assert!(jit_bool("(and (< 1 2) (> 3 1))").unwrap());
+        assert!(jit_bool("(or (= 1 2) (< 1 2))").unwrap());
+        assert!(jit_bool("(not (and (< 1 2) (> 1 3)))").unwrap());
+    }
+
     #[test]
     fn jit_unsupported_node_is_error_not_panic() {
-        // Anything outside Step 2's scope must return Err so that the
+        // Anything outside Step 4's scope must return Err so that the
         // future `--llvm` REPL surfaces a clean message instead of crashing.
-        let err = jit_i32("(if true 1 0)").unwrap_err();
+        // `let-in` lands in Step 6, so it's still unsupported.
+        let err = jit_i32("(let x 1 x)").unwrap_err();
         assert!(
             err.contains("not supported"),
             "expected unsupported error, got: {}",
