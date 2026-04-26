@@ -241,6 +241,7 @@ Type 'exit' or press Ctrl+C to quit
 - `(cons head tail)` — 非空リストを先頭と残りに分解（入れ子可）
 - `(list p1 p2 ...)` — ちょうどN要素のリストに位置でマッチ（`cons` 連鎖の糖衣）
 - `(as <pat> <name>)` — `<pat>` にマッチしつつ、値全体を `<name>` でも束縛
+- `(guard <pat> <expr>)` — `<pat>` にマッチしつつ、`<expr>`（bool）が真のときだけ成立。`<pat>` で束縛した変数は `<expr>` 内で使える
 
 ```lisp
 > (match 1 (1 "one") (2 "two") (_ "other"))
@@ -275,6 +276,19 @@ Type 'exit' or press Ctrl+C to quit
     ((as (cons h _) xs) (+ h (length xs)))
     (_ 0))
 4: i32
+
+; (guard ...) パターン: 値の条件で絞り込み
+> (defn classify [n: i32] -> String
+    (match n
+      ((guard x (> x 0)) "positive")
+      (0                 "zero")
+      (x                 "negative")))
+
+> (classify 7)
+"positive": String
+
+> (classify -3)
+"negative": String
 ```
 
 ## プロジェクト構造

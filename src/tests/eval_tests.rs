@@ -1167,4 +1167,100 @@ mod tests {
         .unwrap();
         assert_eq!(ty, Type::I32);
     }
+
+    #[test]
+    fn test_eval_match_guard_passes() {
+        // Guard expression is true → arm is taken.
+        let result = eval_str(
+            "(match 5 ((guard x (> x 0)) \"pos\") (_ \"other\"))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "pos"));
+    }
+
+    #[test]
+    fn test_eval_match_guard_fails_falls_through() {
+        // Guard false → fall through to next arm. Bindings from the failed
+        // guard arm must not leak into the catch-all.
+        let result = eval_str(
+            "(match -3 ((guard x (> x 0)) \"pos\") (_ \"other\"))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "other"));
+    }
+
+    #[test]
+    fn test_eval_match_guard_with_cons_binding() {
+        // Variables bound by the inner cons pattern are visible to the guard.
+        let result = eval_str(
+            "(match (list 1 2 3) \
+               ((guard (cons h _) (> h 0)) h) \
+               (_ -1))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(1)));
+    }
+
+    #[test]
+    fn test_eval_match_guard_under_as() {
+        // `as` inside a guard exposes both component (`x`) and whole (`whole`)
+        // bindings to the guard expression and the body.
+        let result = eval_str(
+            "(match 5 ((guard (as x whole) (> whole 0)) x) (_ -1))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(5)));
+    }
+
+    #[test]
+    fn test_eval_match_guard_three_way() {
+        // Classic guard use case: split positive / zero / negative in one match.
+        let pos = eval_str(
+            "(match 7 \
+               ((guard x (> x 0)) \"positive\") \
+               (0 \"zero\") \
+               (_ \"negative\"))",
+        )
+        .unwrap();
+        assert!(matches!(pos, Value::String(ref s) if s == "positive"));
+
+        let zero = eval_str(
+            "(match 0 \
+               ((guard x (> x 0)) \"positive\") \
+               (0 \"zero\") \
+               (_ \"negative\"))",
+        )
+        .unwrap();
+        assert!(matches!(zero, Value::String(ref s) if s == "zero"));
+
+        let neg = eval_str(
+            "(match -7 \
+               ((guard x (> x 0)) \"positive\") \
+               (0 \"zero\") \
+               (_ \"negative\"))",
+        )
+        .unwrap();
+        assert!(matches!(neg, Value::String(ref s) if s == "negative"));
+    }
+
+    #[test]
+    fn test_type_check_match_guard_must_be_bool() {
+        // Guard expression must be Bool. `(+ x 1)` is i32, so this should
+        // be rejected by the type checker.
+        let err = type_check_str(
+            "(match 5 ((guard x (+ x 1)) \"x\") (_ \"y\"))",
+        )
+        .unwrap_err();
+        assert!(err.contains("Bool"), "expected Bool error, got: {}", err);
+    }
+
+    #[test]
+    fn test_type_check_match_guard_undefined_var() {
+        // Free variable `y` inside the guard should be reported as undefined.
+        let err = type_check_str(
+            "(match 5 ((guard x (> y 0)) \"x\") (_ \"y\"))",
+        )
+        .unwrap_err();
+        assert!(err.contains('y'), "expected undefined-var error, got: {}", err);
+    }
 }
