@@ -572,15 +572,64 @@ mod tests {
         );
     }
 
+    // -------- Issue #15: lambda return-type inference --------
+
     #[test]
-    fn jit_lambda_without_return_type_errors() {
-        // The MVP requires explicit return type on lambdas so codegen
-        // doesn't have to do its own inference.
+    fn jit_lambda_return_type_inferred_i32() {
+        // No `-> i32` annotation: the codegen runs a small type-check
+        // pass on the body to infer it from the params.
         let src = "(let twice (fn [x: i32] (* x 2)) (twice 21))";
+        assert_eq!(jit_i32(src).unwrap(), 42);
+    }
+
+    #[test]
+    fn jit_lambda_return_type_inferred_f64() {
+        let src = "(let half (fn [x: f64] (*. x 0.5)) (half 8.0))";
+        let forms = parse_program(src);
+        let r = codegen::jit_eval_f64_program(&forms).unwrap();
+        assert!((r - 4.0).abs() < 1e-9, "got {}", r);
+    }
+
+    #[test]
+    fn jit_lambda_return_type_inferred_bool() {
+        let src = "(let is-pos (fn [x: i32] (> x 0)) (is-pos 5))";
+        let forms = parse_program(src);
+        assert!(codegen::jit_eval_bool_program(&forms).unwrap());
+    }
+
+    #[test]
+    fn jit_lambda_return_type_inferred_with_if() {
+        // Body uses `if` — both branches must agree on type for the
+        // type-checker to converge, exercising the inference more.
+        let src = "(let abs (fn [x: i32] (if (< x 0) (- 0 x) x)) (abs -7))";
+        assert_eq!(jit_i32(src).unwrap(), 7);
+    }
+
+    #[test]
+    fn jit_lambda_return_type_inferred_via_aot() {
+        // Lambda inside a defn body, return type omitted.
+        let src = r#"
+            (defn apply-double [n: i32] -> i32
+              (let f (fn [x: i32] (* x 2))
+                (f n)))
+            (apply-double 21)
+        "#;
+        assert_eq!(jit_i32_prog(src).unwrap(), 42);
+    }
+
+    #[test]
+    fn jit_lambda_inferred_body_type_error_propagates() {
+        // If the body itself is ill-typed, the inference pass surfaces
+        // a clean error instead of crashing in codegen.
+        // `(+ x true)` mixes int and bool — the type-checker rejects
+        // the body, and we wrap that as a JIT error.
+        let src = "(let bad (fn [x: i32] (+ x true)) (bad 1))";
         let err = jit_i32(src).unwrap_err();
         assert!(
-            err.contains("return type"),
-            "expected return-type error, got: {}",
+            err.contains("infer lambda return type")
+                || err.contains("bool")
+                || err.contains("type"),
+            "expected a type-inference error, got: {}",
             err
         );
     }
