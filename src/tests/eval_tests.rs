@@ -1340,18 +1340,20 @@ mod tests {
     }
 
     #[test]
-    fn test_exhaustive_inferred_skipped() {
-        // When the scrutinee type is Inferred (parameter type `_`), the
-        // exhaustiveness check skips silently. This avoids false positives
-        // before bidirectional inference (#8) lands. We use a lambda with
-        // an inferred parameter type so the return type is also inferred —
-        // the only thing under test is that the non-exhaustive `match`
-        // inside does not raise an exhaustiveness error.
-        let ty = type_check_str(
+    fn test_match_cons_refines_inferred_param() {
+        // 段階 A bidirectional inference: a `_` parameter used as the
+        // scrutinee of a `match` whose arms include a `cons` pattern is
+        // refined to `List<_>`. Exhaustiveness then runs and detects the
+        // missing `nil` case.
+        let err = type_check_str(
             "(fn [xs: _] (match xs ((cons _ _) 1)))",
         )
-        .unwrap();
-        assert!(matches!(ty, Type::Function { .. }));
+        .unwrap_err();
+        assert!(
+            err.contains("not exhaustive") && err.contains("nil"),
+            "expected missing nil after refinement, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -1366,6 +1368,204 @@ mod tests {
         assert!(
             err.contains("not exhaustive") && err.contains("true"),
             "expected missing-true error (guard does not count), got: {}",
+            err
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Bidirectional inference (段階 A)
+    // -----------------------------------------------------------------
+
+    /// Type-check several top-level forms in sequence against a shared
+    /// `TypeEnv`. Returns the type of the last form. Mirrors the REPL
+    /// loop so tests can stage `(defn ...)` then a call site.
+    fn type_check_seq(inputs: &[&str]) -> Result<Type, String> {
+        let mut env = TypeEnv::new();
+        let mut last = Type::Inferred;
+        for input in inputs {
+            let expr = parser::parse(input).map_err(|e| e.to_string())?;
+            last = type_check(&expr, &mut env)?;
+        }
+        Ok(last)
+    }
+
+    /// Type-check + eval several top-level forms against shared envs and
+    /// return the value of the last form. Type errors short-circuit
+    /// before evaluation, mirroring the REPL.
+    fn run_seq(inputs: &[&str]) -> Result<Value, String> {
+        let mut tenv = TypeEnv::new();
+        let mut env = Environment::new();
+        let mut last_val = Value::Integer32(0);
+        for input in inputs {
+            let expr = parser::parse(input).map_err(|e| e.to_string())?;
+            type_check(&expr, &mut tenv)?;
+            last_val = eval(&expr, &mut env)?;
+        }
+        Ok(last_val)
+    }
+
+    #[test]
+    fn test_infer_fold_param() {
+        // The `xs: _` param is narrowed to `List<i32>` by the lambda's
+        // second parameter type. Defn's signature reflects that narrowing.
+        let ty = type_check_seq(&[
+            "(defn sum [xs: _] -> i32 (fold (fn [a: i32 x: i32] -> i32 (+ a x)) 0 xs))",
+        ])
+        .unwrap();
+        match ty {
+            Type::Function { params, return_type } => {
+                assert_eq!(params.len(), 1);
+                match &params[0] {
+                    Type::List(inner) => assert!(matches!(**inner, Type::I32)),
+                    other => panic!("expected List<i32> param, got {}", other),
+                }
+                assert!(matches!(*return_type, Type::I32));
+            }
+            other => panic!("expected function type, got {}", other),
+        }
+    }
+
+    #[test]
+    fn test_infer_fold_call() {
+        // After refinement, `(sum (list 1 2 3))` type-checks and evaluates.
+        let v = run_seq(&[
+            "(defn sum [xs: _] -> i32 (fold (fn [a: i32 x: i32] -> i32 (+ a x)) 0 xs))",
+            "(sum (list 1 2 3))",
+        ])
+        .unwrap();
+        assert!(matches!(v, Value::Integer32(6)));
+    }
+
+    #[test]
+    fn test_infer_length() {
+        // `length` arg is `List<_>`; `xs: _` narrows to `List<_>`.
+        let ty = type_check_seq(&["(defn len [xs: _] -> i32 (length xs))"]).unwrap();
+        match ty {
+            Type::Function { params, return_type } => {
+                assert_eq!(params.len(), 1);
+                assert!(matches!(&params[0], Type::List(_)));
+                assert!(matches!(*return_type, Type::I32));
+            }
+            other => panic!("expected function, got {}", other),
+        }
+    }
+
+    #[test]
+    fn test_infer_car() {
+        let ty = type_check_seq(&["(defn head [xs: _] -> i32 (car xs))"]).unwrap();
+        assert!(matches!(ty, Type::Function { .. }));
+    }
+
+    #[test]
+    fn test_infer_filter() {
+        let ty = type_check_seq(&[
+            "(defn keep [xs: _] -> List<i32> (filter (fn [x: i32] -> bool (> x 0)) xs))",
+        ])
+        .unwrap();
+        match ty {
+            Type::Function { params, .. } => match &params[0] {
+                Type::List(inner) => assert!(matches!(**inner, Type::I32)),
+                other => panic!("expected List<i32>, got {}", other),
+            },
+            other => panic!("expected function, got {}", other),
+        }
+    }
+
+    #[test]
+    fn test_infer_map() {
+        let ty = type_check_seq(&[
+            "(defn double [xs: _] -> List<i32> (map (fn [x: i32] -> i32 (* x 2)) xs))",
+        ])
+        .unwrap();
+        match ty {
+            Type::Function { params, .. } => match &params[0] {
+                Type::List(inner) => assert!(matches!(**inner, Type::I32)),
+                other => panic!("expected List<i32>, got {}", other),
+            },
+            other => panic!("expected function, got {}", other),
+        }
+    }
+
+    #[test]
+    fn test_infer_match_cons_only_errors() {
+        // After Step 5 refinement, exhaustiveness sees `List<_>` and the
+        // missing `nil` case is reported.
+        let err = type_check_seq(&[
+            "(defn f [xs: _] -> i32 (match xs ((cons h _) h)))",
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("not exhaustive") && err.contains("nil"),
+            "expected missing nil, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_infer_match_full() {
+        // Both `cons` and `nil` arms cover `List<_>` exhaustively.
+        let ty = type_check_seq(&[
+            "(defn f [xs: _] -> i32 (match xs ((cons h _) h) (nil 0)))",
+        ])
+        .unwrap();
+        assert!(matches!(ty, Type::Function { .. }));
+    }
+
+    #[test]
+    fn test_infer_complex_scrutinee_unchanged() {
+        // The scrutinee is not a plain symbol, so no refinement happens
+        // (the literal already has a concrete `List<i32>` type).
+        let ty = type_check_seq(&[
+            "(match (cons 1 nil) ((cons h _) h) (nil 0))",
+        ])
+        .unwrap();
+        assert!(matches!(ty, Type::I32));
+    }
+
+    #[test]
+    fn test_infer_null_check() {
+        let ty = type_check_seq(&["(defn is-empty [xs: _] -> bool (null? xs))"]).unwrap();
+        assert!(matches!(ty, Type::Function { .. }));
+    }
+
+    #[test]
+    fn test_infer_conflict() {
+        // `(length xs)` narrows xs to `List<_>`; then `(+ xs 1)` would
+        // require an integer — the call's argument-type check rejects it
+        // because `+` expects two operands compatible with the same
+        // (Inferred) parameter, but `List<_>` and `i32` do not match.
+        let err = type_check_seq(&[
+            "(defn bad [xs: _] -> i32 (+ (length xs) (car xs)))",
+        ]);
+        // After length narrows to List<_>, car narrows further if needed.
+        // This particular combination should still type-check because car
+        // returns Inferred. Use a clearer conflict instead:
+        // try `(length xs)` then add `xs` directly to an int, which can't
+        // satisfy the parameter type of `+`.
+        let _ = err;
+        let err2 = type_check_seq(&[
+            "(defn bad [xs: _] -> i32 (+ (length xs) xs))",
+        ])
+        .unwrap_err();
+        assert!(
+            err2.contains("Type mismatch") || err2.contains("expected"),
+            "expected a type error mixing list and int, got: {}",
+            err2
+        );
+    }
+
+    #[test]
+    fn test_infer_signature_visible_at_call() {
+        // After defn, the signature is `List<i32> -> i32`. Calling with
+        // `List<String>` should be rejected.
+        let err = type_check_seq(&[
+            "(defn sum [xs: _] -> i32 (fold (fn [a: i32 x: i32] -> i32 (+ a x)) 0 xs))",
+            "(sum (list \"a\" \"b\"))",
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("Type mismatch") || err.contains("expected"),
+            "expected type error from passing List<String> to sum, got: {}",
             err
         );
     }
