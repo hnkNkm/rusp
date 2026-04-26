@@ -67,6 +67,10 @@ pub enum Pattern {
     /// `<expr>` to evaluate to `true` in the env extended with `<pat>`'s
     /// bindings. Used to express conditional pattern arms without nesting `if`.
     Guard(Box<Pattern>, Box<Expr>),
+    /// `(or p1 p2 ...)` — match if any branch matches. All branches must
+    /// bind the same set of names with the same types (soundness). The
+    /// first matching branch's bindings are used by the arm body.
+    Or(Vec<Pattern>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,6 +206,13 @@ impl fmt::Display for Pattern {
             Pattern::Cons(head, tail) => write!(f, "(cons {} {})", head, tail),
             Pattern::As(inner, name) => write!(f, "({} as {})", inner, name),
             Pattern::Guard(inner, expr) => write!(f, "(guard {} {})", inner, expr),
+            Pattern::Or(branches) => {
+                write!(f, "(or")?;
+                for b in branches {
+                    write!(f, " {}", b)?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }

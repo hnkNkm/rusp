@@ -259,6 +259,19 @@ fn pattern_match(pattern: &Pattern, value: &Value, env: &mut Environment) -> boo
             // result here is treated as a failed match defensively.
             matches!(eval(guard_expr, env), Ok(Value::Bool(true)))
         }
+        (Pattern::Or(branches), v) => {
+            // Try each branch left-to-right. On failure, restore the env
+            // so partial bindings from the failed branch don't leak into
+            // the next attempt or the arm body.
+            let snap = env.snapshot();
+            for b in branches {
+                if pattern_match(b, v, env) {
+                    return true;
+                }
+                env.restore(snap.clone());
+            }
+            false
+        }
         _ => false,
     }
 }

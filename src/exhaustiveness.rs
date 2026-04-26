@@ -31,7 +31,16 @@ const MAX_DEPTH: usize = 3;
 /// Entry point. Returns Ok if `arms` cover every value of `scrutinee`,
 /// otherwise an error listing the missing patterns.
 pub fn check(scrutinee: &Type, arms: &[&Pattern]) -> Result<(), String> {
-    let witnesses = missing(scrutinee, arms, 0);
+    // Flatten top-level `(or p1 p2 ...)` arms into sibling patterns so the
+    // existing constructor-based reduction sees them directly. We deliberately
+    // do NOT descend into Guard or Cons sub-patterns: guards stay opaque
+    // (their truth is runtime-known), and per-constructor recursion handles
+    // nested or-patterns through the arm list naturally.
+    let mut flat: Vec<&Pattern> = Vec::with_capacity(arms.len());
+    for a in arms {
+        flatten_or(a, &mut flat);
+    }
+    let witnesses = missing(scrutinee, &flat, 0);
     if witnesses.is_empty() {
         return Ok(());
     }
@@ -40,6 +49,21 @@ pub fn check(scrutinee: &Type, arms: &[&Pattern]) -> Result<(), String> {
         "match is not exhaustive: missing patterns: {}",
         rendered.join(", ")
     ))
+}
+
+/// Flatten top-level `(or ...)` and `(p as name)` wrappers into the
+/// underlying constructor patterns. `Guard` is a hard stop — its
+/// runtime opacity must be preserved for soundness.
+fn flatten_or<'a>(pat: &'a Pattern, out: &mut Vec<&'a Pattern>) {
+    match pat {
+        Pattern::Or(branches) => {
+            for b in branches {
+                flatten_or(b, out);
+            }
+        }
+        Pattern::As(inner, _) => flatten_or(inner, out),
+        _ => out.push(pat),
+    }
 }
 
 /// Strip away outer `As` wrappers so structural inspection sees the inner

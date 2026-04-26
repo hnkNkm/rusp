@@ -453,4 +453,15 @@ impl Environment {
             parent: Some(Box::new(self.clone())),
         }
     }
+
+    /// Capture the current local-scope bindings (parent chain unchanged).
+    /// Used by or-pattern evaluation to restore state after a failed branch.
+    pub fn snapshot(&self) -> HashMap<String, Value> {
+        self.values.clone()
+    }
+
+    /// Replace the local-scope bindings with `snap`. Pairs with `snapshot`.
+    pub fn restore(&mut self, snap: HashMap<String, Value>) {
+        self.values = snap;
+    }
 }

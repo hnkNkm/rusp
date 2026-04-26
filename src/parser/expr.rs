@@ -432,6 +432,21 @@ fn parse_compound_pattern(
                 crate::ast::Pattern::Guard(Box::new(inner), Box::new(guard_expr)),
             ))
         }
+        "or" => {
+            // (or <pat> <pat> ...) — 1 or more branches required
+            let (input, branches) =
+                many0(preceded(multispace0, parse_pattern))(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, _) = char(')')(input)?;
+            if branches.is_empty() {
+                return Err(nom::Err::Failure(
+                    crate::parser::error::ParseError::UnexpectedInput(
+                        "(or ...) requires at least one branch".to_string(),
+                    ),
+                ));
+            }
+            Ok((input, crate::ast::Pattern::Or(branches)))
+        }
         other => Err(nom::Err::Failure(
             crate::parser::error::ParseError::UnexpectedInput(format!(
                 "unknown compound pattern: ({} ...)",
