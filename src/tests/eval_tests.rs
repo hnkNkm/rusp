@@ -1569,4 +1569,171 @@ mod tests {
             err
         );
     }
+
+    // ======================================================================
+    // Or-patterns `(or p1 p2 ...)`
+    // ======================================================================
+
+    #[test]
+    fn test_eval_or_literal_first_matches() {
+        // First branch of an or-pattern matches → arm is taken.
+        let result = eval_str(
+            "(match 1 ((or 1 2) \"a\") (_ \"b\"))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "a"));
+    }
+
+    #[test]
+    fn test_eval_or_literal_second_matches() {
+        // Second branch matches when the first does not.
+        let result = eval_str(
+            "(match 2 ((or 1 2) \"a\") (_ \"b\"))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "a"));
+    }
+
+    #[test]
+    fn test_eval_or_literal_no_match_falls_through() {
+        // No or-branch matches → fall through to next arm.
+        let result = eval_str(
+            "(match 3 ((or 1 2) \"a\") (_ \"b\"))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "b"));
+    }
+
+    #[test]
+    fn test_eval_or_with_shared_binding() {
+        // Both branches bind `h` at the head position with type i32. The
+        // first branch matches a single-element list, the second matches
+        // a 2+ element list whose first element we want to ignore.
+        let result = eval_str(
+            "(match (list 10 20) \
+               ((or (cons h nil) (cons _ (cons h _))) h) \
+               (_ -1))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(20)));
+    }
+
+    #[test]
+    fn test_type_check_or_inconsistent_branch_types() {
+        // Mixing i32 and bool literals in the same or-pattern: the second
+        // branch can't possibly type-check against an i32 scrutinee.
+        let err = type_check_str(
+            "(match 1 ((or 1 true) \"x\") (_ \"y\"))",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Bool") || err.contains("Type") || err.contains("type"),
+            "expected a type error mixing i32 and bool, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_type_check_or_unequal_binding_sets() {
+        // `(or x 1)` binds `x` in the first branch but not the second.
+        let err = type_check_str(
+            "(match 1 ((or x 1) 0) (_ -1))",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("bound in some branches but not others"),
+            "expected unequal-binding-sets error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_type_check_or_inconsistent_binding_types() {
+        // Both branches bind `h` but at different types: head of List<i32>
+        // is i32, but the whole list itself is List<i32>. (`as` exposes
+        // the whole value with the scrutinee's type.)
+        let err = type_check_str(
+            "(match (list 1 2) \
+               ((or (cons h _) (as _ h)) 0) \
+               (_ -1))",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("inconsistent types"),
+            "expected inconsistent-types error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_eval_or_nested_flattens() {
+        // Nested or-patterns work via natural recursion in pattern_match.
+        let result = eval_str(
+            "(match 3 ((or (or 1 2) 3) \"hit\") (_ \"miss\"))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "hit"));
+    }
+
+    #[test]
+    fn test_eval_or_single_branch_passthrough() {
+        // A single-branch or-pattern behaves the same as the inner pattern.
+        let result = eval_str(
+            "(match 1 ((or 1) \"yes\") (_ \"no\"))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "yes"));
+    }
+
+    #[test]
+    fn test_exhaustive_or_covers_bool() {
+        // `(or true false)` covers all Bool values → no exhaustiveness error.
+        let result = type_check_str(
+            "(match (= 1 1) ((or true false) 1))",
+        );
+        assert!(
+            result.is_ok(),
+            "expected or to cover Bool exhaustively, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_exhaustive_or_partial_list() {
+        // `(or nil (cons 0 _))` covers nil + cons-with-head-0, leaving
+        // cons-with-other-head uncovered.
+        let err = type_check_str(
+            "(match (list 1 2) ((or nil (cons 0 _)) 1))",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not exhaustive"),
+            "expected exhaustiveness error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_eval_or_env_restore() {
+        // Both branches bind `h` (same name, same type — soundness OK), but
+        // they bind it to different positions. We craft a list where the
+        // first branch matches partially: its outer `cons` succeeds and
+        // binds `h = 1`, but the inner literal `99` fails. Without env
+        // restore, `h = 1` would leak into the second branch and be
+        // overwritten only if the second branch also matches at that name.
+        // Here the second branch binds `h = 20` (the second element). If
+        // restore is broken AND the match short-circuits oddly, we'd see
+        // the wrong value. Correct behavior: second branch binds h=20.
+        let result = eval_str(
+            "(match (list 1 2 20) \
+               ((or (cons h (cons 99 _)) (cons _ (cons _ (cons h nil)))) h) \
+               (_ -1))",
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::Integer32(20)),
+            "expected 20 from second or-branch, got: {:?}",
+            result
+        );
+    }
 }

@@ -735,7 +735,89 @@ fn is_list_shaped(pat: &Pattern) -> bool {
         Pattern::Cons(_, _) | Pattern::Nil => true,
         Pattern::As(inner, _) => is_list_shaped(inner),
         Pattern::Guard(inner, _) => is_list_shaped(inner),
+        // Any branch hinting at a list structure is enough to refine
+        // the scrutinee to `List<_>`. Mismatched branches (e.g. a literal
+        // i32 alongside a cons) will still be reported by check_pattern.
+        Pattern::Or(branches) => branches.iter().any(is_list_shaped),
         _ => false,
+    }
+}
+
+/// Pure version of `bind_pattern`: returns the (name, type) bindings that
+/// the pattern would introduce, without mutating any environment. Used for
+/// or-pattern soundness — every branch must produce the same set of
+/// bindings (same names, compatible types).
+fn collect_bindings(
+    pat: &Pattern,
+    scrutinee: &Type,
+) -> Result<HashMap<String, Type>, String> {
+    match pat {
+        Pattern::Wildcard
+        | Pattern::Nil
+        | Pattern::LiteralI32(_)
+        | Pattern::LiteralI64(_)
+        | Pattern::LiteralF64(_)
+        | Pattern::LiteralBool(_)
+        | Pattern::LiteralString(_) => Ok(HashMap::new()),
+        Pattern::Variable(name) => {
+            let mut m = HashMap::new();
+            m.insert(name.clone(), scrutinee.clone());
+            Ok(m)
+        }
+        Pattern::Cons(head, tail) => {
+            let (head_ty, tail_ty) = match scrutinee {
+                Type::List(elem) => (*elem.clone(), scrutinee.clone()),
+                _ => (Type::Inferred, Type::List(Box::new(Type::Inferred))),
+            };
+            let mut m = collect_bindings(head, &head_ty)?;
+            for (k, v) in collect_bindings(tail, &tail_ty)? {
+                m.insert(k, v);
+            }
+            Ok(m)
+        }
+        Pattern::As(inner, name) => {
+            let mut m = collect_bindings(inner, scrutinee)?;
+            m.insert(name.clone(), scrutinee.clone());
+            Ok(m)
+        }
+        Pattern::Guard(inner, _) => collect_bindings(inner, scrutinee),
+        Pattern::Or(branches) => {
+            // Defensive: parser rejects empty or, but guard the invariant.
+            if branches.is_empty() {
+                return Err("empty or-pattern".to_string());
+            }
+            let first = collect_bindings(&branches[0], scrutinee)?;
+            for b in &branches[1..] {
+                let m = collect_bindings(b, scrutinee)?;
+                // Same key sets in both directions.
+                for k in first.keys() {
+                    if !m.contains_key(k) {
+                        return Err(format!(
+                            "or-pattern: variable `{}` bound in some branches but not others",
+                            k
+                        ));
+                    }
+                }
+                for (k, v) in &m {
+                    match first.get(k) {
+                        None => {
+                            return Err(format!(
+                                "or-pattern: variable `{}` bound in some branches but not others",
+                                k
+                            ));
+                        }
+                        Some(expected) if !types_match(expected, v) => {
+                            return Err(format!(
+                                "or-pattern: variable `{}` has inconsistent types: {} vs {}",
+                                k, expected, v
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            Ok(first)
+        }
     }
 }
 
@@ -823,6 +905,17 @@ fn check_pattern(
             }
             Ok(())
         }
+        Pattern::Or(branches) => {
+            if branches.is_empty() {
+                return Err("empty or-pattern".to_string());
+            }
+            // Each branch must be type-compatible with the scrutinee.
+            for b in branches {
+                check_pattern(b, scrutinee, env)?;
+            }
+            // All branches must introduce the same (name, type) bindings.
+            collect_bindings(pattern, scrutinee).map(|_| ())
+        }
     }
 }
 
@@ -858,6 +951,14 @@ fn bind_pattern(pattern: &Pattern, scrutinee: &Type, env: &mut TypeEnv) {
         Pattern::Guard(inner, _) => {
             // Guard expr does not introduce bindings; the inner pattern does.
             bind_pattern(inner, scrutinee, env);
+        }
+        Pattern::Or(branches) => {
+            // `check_pattern` ensured all branches introduce the same
+            // (name, type) bindings, so binding from the first branch is
+            // sufficient for type-checking the arm body.
+            if let Some(first) = branches.first() {
+                bind_pattern(first, scrutinee, env);
+            }
         }
     }
 }

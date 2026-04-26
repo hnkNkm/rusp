@@ -266,6 +266,7 @@ Type 'exit' or press Ctrl+C to quit
 - `(list p1 p2 ...)` — ちょうどN要素のリストに位置でマッチ（`cons` 連鎖の糖衣）
 - `(as <pat> <name>)` — `<pat>` にマッチしつつ、値全体を `<name>` でも束縛
 - `(guard <pat> <expr>)` — `<pat>` にマッチしつつ、`<expr>`（bool）が真のときだけ成立。`<pat>` で束縛した変数は `<expr>` 内で使える
+- `(or <pat> <pat> ...)` — いずれかの枝にマッチ。**全枝が同じ名前・同じ型の変数を束縛**しなければなりません（健全性のため）。1 枝以上必要
 
 `Bool` と `List<T>` を scrutinee にした `match` は **型チェック時に網羅性を検証** します。ケースが漏れていると不足パターンを示すエラーになります（`_` や変数で全受けすれば回避可）:
 
@@ -325,7 +326,23 @@ Error: match is not exhaustive: missing patterns: (cons _ _)
 
 > (classify -3)
 "negative": String
+
+; (or ...) パターン: 複数のケースをまとめる
+> (match 2 ((or 1 2 3) "small") ((or 10 20) "medium") (_ "other"))
+"small": String
+
+; or 内で同名変数を束縛する場合は全枝で同じ型である必要があります
+> (match (list 1 2)
+    ((or (cons 1 _) (cons _ (cons 1 _))) "has-one")
+    (_ "no-one"))
+"has-one": String
+
+; 異なる名前を束縛するとコンパイルエラー（健全性チェック）
+> (match 1 ((or x 2) 0) (_ -1))
+Error: or-pattern: variable `x` bound in some branches but not others
 ```
+
+ガード内の `or` (`(guard (or 1 2) (...))`) は guard の不透明性を保つため、網羅性検査では展開されません。`(or _ 1)` のような到達不能な枝は現状サイレントに通します（将来 `unreachable_patterns` 警告として扱う予定）。
 
 ## プロジェクト構造
 
