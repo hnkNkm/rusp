@@ -1,4 +1,4 @@
-//! Minimal JIT entry point for Steps 2–6: parse → type-check → codegen → run.
+//! Minimal JIT entry point for Steps 2–7: parse → type-check → codegen → run.
 //!
 //! Supports:
 //! - i32/i64 literals and integer arithmetic (`+`, `-`, `*`, `/`)
@@ -8,6 +8,7 @@
 //! - `if` (with phi-merge)
 //! - `and`/`or`/`not` (short-circuit for `and`/`or`, xor for `not`)
 //! - `let`-in (lexical bindings via a flat HashMap; SSA values, no alloca)
+//! - `defn` + `(f x y)` calls, including direct recursion
 //!
 //! Integer arithmetic / comparison forms infer their width from the
 //! leading operand; the type checker has already enforced that every
@@ -22,13 +23,16 @@ use inkwell::OptimizationLevel;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
-use inkwell::types::{BasicType, BasicTypeEnum};
-use inkwell::values::{BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue};
+use inkwell::module::Module;
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
+};
 use inkwell::{FloatPredicate, IntPredicate};
 
 use std::collections::HashMap;
 
-use crate::ast::Expr;
+use crate::ast::{Expr, Type};
 
 pub type JitError = String;
 
@@ -38,18 +42,12 @@ pub type JitError = String;
 /// run the type checker. Any unsupported AST node returns an error rather
 /// than panicking, so callers can surface a clean message in the REPL.
 pub fn jit_eval_i32(expr: &Expr) -> Result<i32, JitError> {
-    let context = Context::create();
-    let result = compile_and_run(&context, expr, ReturnKind::I32)?;
-    // SAFETY of the cast: the JIT returned an i32 inside a u64 (we trampoline
-    // through u64 to keep one signature for both widths). Truncation is safe.
-    Ok(result.as_u64 as i32)
+    jit_eval_i32_program(std::slice::from_ref(expr))
 }
 
 /// Compile and JIT-run `expr` as an `i64`-returning thunk.
 pub fn jit_eval_i64(expr: &Expr) -> Result<i64, JitError> {
-    let context = Context::create();
-    let result = compile_and_run(&context, expr, ReturnKind::I64)?;
-    Ok(result.as_u64 as i64)
+    jit_eval_i64_program(std::slice::from_ref(expr))
 }
 
 /// Compile and JIT-run `expr` as a `bool`-returning thunk.
@@ -59,18 +57,185 @@ pub fn jit_eval_i64(expr: &Expr) -> Result<i64, JitError> {
 /// comparing against zero is portable and is what every other inkwell
 /// example does too.
 pub fn jit_eval_bool(expr: &Expr) -> Result<bool, JitError> {
-    let context = Context::create();
-    let result = compile_and_run(&context, expr, ReturnKind::Bool)?;
-    Ok(result.as_u64 != 0)
+    jit_eval_bool_program(std::slice::from_ref(expr))
 }
 
 /// Compile and JIT-run `expr` as an `f64`-returning thunk. Floats can't
 /// trampoline through u64 (different ABI registers, no bitcast at the
 /// boundary), so the float case is handled separately.
 pub fn jit_eval_f64(expr: &Expr) -> Result<f64, JitError> {
+    jit_eval_f64_program(std::slice::from_ref(expr))
+}
+
+/// Program-form variants: any number of leading `defn` forms followed
+/// by a final expression. The defns are emitted as real LLVM functions
+/// (so they're available for `Call` and recursion); the final expression
+/// becomes the body of the `__expr` thunk. Empty slices and slices that
+/// don't end in an expression-shaped form are rejected.
+pub fn jit_eval_i32_program(forms: &[Expr]) -> Result<i32, JitError> {
     let context = Context::create();
-    let result = compile_and_run(&context, expr, ReturnKind::F64)?;
+    let result = compile_program_and_run(&context, forms, ReturnKind::I32)?;
+    Ok(result.as_u64 as i32)
+}
+
+pub fn jit_eval_i64_program(forms: &[Expr]) -> Result<i64, JitError> {
+    let context = Context::create();
+    let result = compile_program_and_run(&context, forms, ReturnKind::I64)?;
+    Ok(result.as_u64 as i64)
+}
+
+pub fn jit_eval_bool_program(forms: &[Expr]) -> Result<bool, JitError> {
+    let context = Context::create();
+    let result = compile_program_and_run(&context, forms, ReturnKind::Bool)?;
+    Ok(result.as_u64 != 0)
+}
+
+pub fn jit_eval_f64_program(forms: &[Expr]) -> Result<f64, JitError> {
+    let context = Context::create();
+    let result = compile_program_and_run(&context, forms, ReturnKind::F64)?;
     Ok(result.as_f64)
+}
+
+/// Split a program slice into `(leading defns, final expression)`.
+/// Returns an error if the slice is empty or doesn't end in something
+/// that can be the result expression. We don't enforce that all defns
+/// must precede the expression — a `defn` after the result expression
+/// would be unreachable in this single-thunk model.
+fn split_program(forms: &[Expr]) -> Result<(Vec<&Expr>, &Expr), JitError> {
+    if forms.is_empty() {
+        return Err("--llvm: empty program (need at least one expression)".to_string());
+    }
+    let last_idx = forms.len() - 1;
+    let last = &forms[last_idx];
+    if matches!(last, Expr::Defn { .. }) {
+        return Err(
+            "--llvm: program's last form must be an expression, not a `defn`".to_string(),
+        );
+    }
+    let mut defns: Vec<&Expr> = Vec::with_capacity(last_idx);
+    for f in &forms[..last_idx] {
+        if !matches!(f, Expr::Defn { .. }) {
+            return Err(
+                "--llvm: only leading `defn` forms followed by one expression are supported"
+                    .to_string(),
+            );
+        }
+        defns.push(f);
+    }
+    Ok((defns, last))
+}
+
+/// Emit a `defn` as a real LLVM function in `module`. Registers the
+/// function value in `functions` *before* emitting the body so
+/// recursive calls resolve. Parameters become entries in the body's
+/// `env`. The body must produce a value matching the declared return
+/// type.
+fn emit_defn<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    builder: &Builder<'ctx>,
+    functions: &mut HashMap<String, FunctionValue<'ctx>>,
+    expr: &Expr,
+) -> Result<(), JitError> {
+    let Expr::Defn { name, params, return_type, body } = expr else {
+        return Err("emit_defn called with non-Defn".to_string());
+    };
+
+    let param_tys: Vec<BasicMetadataTypeEnum> = params
+        .iter()
+        .map(|(_, ty)| -> Result<BasicMetadataTypeEnum, JitError> {
+            Ok(type_to_basic(context, ty)?.into())
+        })
+        .collect::<Result<_, _>>()?;
+    let ret_basic = type_to_basic(context, return_type)?;
+    let fn_t = ret_basic.fn_type(&param_tys, false);
+    let function = module.add_function(name, fn_t, None);
+    functions.insert(name.clone(), function);
+
+    let entry = context.append_basic_block(function, "entry");
+    builder.position_at_end(entry);
+
+    // Bind params into the env.
+    let mut env: HashMap<String, EmitVal<'ctx>> = HashMap::new();
+    for (i, (pname, _)) in params.iter().enumerate() {
+        let pv = function
+            .get_nth_param(i as u32)
+            .ok_or_else(|| format!("defn `{}`: missing param {}", name, i))?;
+        env.insert(pname.clone(), basic_to_emit(pv)?);
+    }
+
+    let mut cg = ExprCg {
+        context,
+        builder,
+        function,
+        env,
+        functions: functions.clone(),
+    };
+    let body_val = cg.emit(body)?;
+
+    // Body's kind must agree with the declared return type.
+    let body_basic = body_val.as_basic_value_enum();
+    if body_basic.get_type() != ret_basic {
+        return Err(format!(
+            "defn `{}`: body type {} doesn't match declared return type",
+            name,
+            body_val.type_name()
+        ));
+    }
+
+    match body_val {
+        EmitVal::Int(iv) => builder
+            .build_return(Some(&iv as &dyn BasicValue))
+            .map(|_| ())
+            .map_err(|e| format!("LLVM build_return failed: {}", e))?,
+        EmitVal::Float(fv) => builder
+            .build_return(Some(&fv as &dyn BasicValue))
+            .map(|_| ())
+            .map_err(|e| format!("LLVM build_return failed: {}", e))?,
+    };
+
+    // Functions discovered while emitting this body (none for now,
+    // since defns aren't nested) flow back via the cg.functions
+    // copy. Merge new entries.
+    for (k, v) in cg.functions {
+        functions.entry(k).or_insert(v);
+    }
+    Ok(())
+}
+
+/// Map a Rusp `Type` to the LLVM basic type used for a function
+/// parameter or return slot. Only scalar Rusp types are supported.
+fn type_to_basic<'ctx>(context: &'ctx Context, ty: &Type) -> Result<BasicTypeEnum<'ctx>, JitError> {
+    Ok(match ty {
+        Type::I32 => context.i32_type().into(),
+        Type::I64 => context.i64_type().into(),
+        Type::Bool => context.bool_type().into(),
+        Type::F64 => context.f64_type().into(),
+        Type::String => return Err("--llvm: String type is not supported by the MVP".to_string()),
+        Type::List(_) => return Err("--llvm: List type is not supported by the MVP".to_string()),
+        Type::Function { .. } => {
+            return Err("--llvm: first-class function types are not supported by the MVP".to_string());
+        }
+        Type::Inferred => {
+            return Err(
+                "--llvm: inferred type leaked to codegen — type checker should have resolved it"
+                    .to_string(),
+            );
+        }
+    })
+}
+
+/// Wrap a function param's `BasicValueEnum` as an `EmitVal`. Floats
+/// become Float, all integer widths become Int.
+fn basic_to_emit(v: BasicValueEnum<'_>) -> Result<EmitVal<'_>, JitError> {
+    match v {
+        BasicValueEnum::IntValue(iv) => Ok(EmitVal::Int(iv)),
+        BasicValueEnum::FloatValue(fv) => Ok(EmitVal::Float(fv)),
+        other => Err(format!(
+            "--llvm: function param has unsupported LLVM type {:?}",
+            other.get_type()
+        )),
+    }
 }
 
 /// What the top-level thunk should return. Determines the function
@@ -113,16 +278,27 @@ impl BoundaryValue {
     }
 }
 
-/// Compile, JIT, and run `__expr` returning a single scalar of the
-/// requested kind.
-fn compile_and_run(
+/// Compile, JIT, and run a program: zero or more leading `defn` forms
+/// followed by exactly one expression that becomes `__expr`'s body.
+fn compile_program_and_run(
     context: &Context,
-    expr: &Expr,
+    forms: &[Expr],
     expected: ReturnKind,
 ) -> Result<BoundaryValue, JitError> {
+    let (defns, expr) = split_program(forms)?;
+
     let module = context.create_module("rusp_jit");
     let builder = context.create_builder();
 
+    // Emit each `defn` as a real LLVM function. The function is
+    // registered in `functions` *before* its body is emitted so that
+    // recursive self-calls resolve.
+    let mut functions: HashMap<String, FunctionValue<'_>> = HashMap::new();
+    for d in &defns {
+        emit_defn(context, &module, &builder, &mut functions, d)?;
+    }
+
+    // Now emit the top-level thunk for the final expression.
     let ret_t: BasicTypeEnum = match expected {
         ReturnKind::I32 => context.i32_type().into(),
         ReturnKind::I64 => context.i64_type().into(),
@@ -139,6 +315,7 @@ fn compile_and_run(
         builder: &builder,
         function,
         env: HashMap::new(),
+        functions,
     };
     let value = cg.emit(expr)?;
 
@@ -253,11 +430,16 @@ struct ExprCg<'ctx, 'a> {
     context: &'ctx Context,
     builder: &'a Builder<'ctx>,
     function: FunctionValue<'ctx>,
-    /// Lexical environment for `let`-bound names. Flat (no parent
-    /// chain) because rebinding via shadowing is implemented by
-    /// snapshotting the displaced entry and restoring it after the
-    /// body. SSA-style: each binding maps to a value, not an alloca.
+    /// Lexical environment for `let`-bound names and function
+    /// parameters. Flat (no parent chain): rebinding via shadowing is
+    /// implemented by snapshotting the displaced entry and restoring
+    /// it after the body. SSA-style — each binding maps to a value,
+    /// not an alloca.
     env: HashMap<String, EmitVal<'ctx>>,
+    /// User-defined functions (from `defn`) by name. Includes the
+    /// currently-being-emitted function before its body is processed,
+    /// so recursive calls resolve.
+    functions: HashMap<String, FunctionValue<'ctx>>,
 }
 
 impl<'ctx, 'a> ExprCg<'ctx, 'a> {
@@ -295,8 +477,12 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
                 self.emit_if(condition, then_branch, else_branch)
             }
 
-            // Operator forms `(op a b ...)` parse as `Expr::List` with the
-            // operator symbol at position 0. Dispatch on the symbol.
+            // S-expression forms `(head a b ...)` parse as `Expr::List`.
+            // The head determines what to do: built-in operators get
+            // dedicated codegen; anything else is treated as a user-
+            // defined function call resolved via `self.functions`.
+            // (The parser doesn't produce `Expr::Call`; that variant
+            // exists in the AST but isn't emitted from S-expressions.)
             Expr::List(exprs) if !exprs.is_empty() => {
                 if let Expr::Symbol(op) = &exprs[0] {
                     let args = &exprs[1..];
@@ -307,19 +493,20 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
                         "and" => self.gen_and(args),
                         "or" => self.gen_or(args),
                         "not" => self.gen_not(args),
-                        other => Err(format!(
-                            "--llvm: operator `{}` not supported yet",
-                            other
-                        )),
+                        // Fall through to user-function call.
+                        _ => self.emit_user_call(op, args),
                     }
                 } else {
-                    Err("--llvm: only operator-headed lists are supported in Step 5".to_string())
+                    Err("--llvm: only symbol-headed lists are supported".to_string())
                 }
             }
 
-            Expr::Call { .. } => {
-                Err("--llvm: function calls are not supported yet (Step 7)".to_string())
-            }
+            // `Expr::Call` is in the AST but the current parser never
+            // produces it; if it ever does, route through emit_user_call.
+            Expr::Call { func, args } => match func.as_ref() {
+                Expr::Symbol(name) => self.emit_user_call(name, args),
+                _ => Err("--llvm: only direct function calls are supported".to_string()),
+            },
 
             other => Err(format!(
                 "--llvm: AST node {:?} is not supported by the MVP yet",
@@ -560,6 +747,45 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             (EmitVal::Int(_), _) => EmitVal::Int(merged.into_int_value()),
             (EmitVal::Float(_), _) => EmitVal::Float(merged.into_float_value()),
         })
+    }
+
+    /// `(name arg1 arg2 ...)` — call a user-defined function. The
+    /// callee must resolve to a name registered in `self.functions`.
+    /// Since the parser produces all calls through `Expr::List`, we
+    /// take the name as a `&str` directly.
+    fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
+        let callee = self.functions.get(name).copied().ok_or_else(|| {
+            format!("--llvm: undefined function `{}`", name)
+        })?;
+
+        let expected_arity = callee.count_params() as usize;
+        if args.len() != expected_arity {
+            return Err(format!(
+                "--llvm: `{}` expects {} arguments, got {}",
+                name,
+                expected_arity,
+                args.len()
+            ));
+        }
+
+        let mut arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
+        for a in args {
+            let v = self.emit(a)?;
+            arg_vals.push(match v {
+                EmitVal::Int(iv) => iv.into(),
+                EmitVal::Float(fv) => fv.into(),
+            });
+        }
+
+        let call_site = self
+            .builder
+            .build_call(callee, &arg_vals, "calltmp")
+            .map_err(|e| format!("LLVM build_call failed: {}", e))?;
+        let ret = call_site
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| format!("--llvm: `{}` returns void; can't use as a value", name))?;
+        basic_to_emit(ret)
     }
 
     /// `(let name value body)` — let-in. Bind `name` to the value of

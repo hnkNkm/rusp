@@ -361,6 +361,148 @@ mod tests {
         );
     }
 
+    // ----------- Step 7: defn + Call + recursion -----------
+
+    /// Helper: parse a multi-form program by repeatedly calling
+    /// `parse_expr` and consuming each top-level S-expression. Each
+    /// form is then handed to `jit_eval_*_program`.
+    fn parse_program(input: &str) -> Vec<crate::ast::Expr> {
+        use crate::parser::expr::parse_expr;
+        let mut forms = Vec::new();
+        let mut rest = input.trim();
+        while !rest.is_empty() {
+            let (remaining, expr) = parse_expr(rest).expect("parse_program parse");
+            forms.push(expr);
+            rest = remaining.trim();
+        }
+        forms
+    }
+
+    fn jit_i32_prog(input: &str) -> Result<i32, String> {
+        let forms = parse_program(input);
+        codegen::jit_eval_i32_program(&forms)
+    }
+
+    fn jit_bool_prog(input: &str) -> Result<bool, String> {
+        let forms = parse_program(input);
+        codegen::jit_eval_bool_program(&forms)
+    }
+
+    fn jit_f64_prog(input: &str) -> Result<f64, String> {
+        let forms = parse_program(input);
+        codegen::jit_eval_f64_program(&forms)
+    }
+
+    #[test]
+    fn jit_defn_simple_call() {
+        let src = r#"
+            (defn double [x: i32] -> i32 (* x 2))
+            (double 21)
+        "#;
+        assert_eq!(jit_i32_prog(src).unwrap(), 42);
+    }
+
+    #[test]
+    fn jit_defn_two_params() {
+        let src = r#"
+            (defn add [a: i32 b: i32] -> i32 (+ a b))
+            (add 3 4)
+        "#;
+        assert_eq!(jit_i32_prog(src).unwrap(), 7);
+    }
+
+    #[test]
+    fn jit_defn_returns_bool() {
+        let src = r#"
+            (defn is-pos [x: i32] -> bool (> x 0))
+            (is-pos 5)
+        "#;
+        assert!(jit_bool_prog(src).unwrap());
+        let src2 = r#"
+            (defn is-pos [x: i32] -> bool (> x 0))
+            (is-pos -3)
+        "#;
+        assert!(!jit_bool_prog(src2).unwrap());
+    }
+
+    #[test]
+    fn jit_defn_returns_f64() {
+        let src = r#"
+            (defn area [r: f64] -> f64 (*. r r))
+            (area 3.0)
+        "#;
+        assert_eq!(jit_f64_prog(src).unwrap(), 9.0);
+    }
+
+    #[test]
+    fn jit_defn_recursion_factorial() {
+        // The classic test: a recursive function whose body calls itself.
+        // The function value must be registered before the body is emitted.
+        let src = r#"
+            (defn fact [n: i32] -> i32
+              (if (<= n 1) 1 (* n (fact (- n 1)))))
+            (fact 5)
+        "#;
+        assert_eq!(jit_i32_prog(src).unwrap(), 120);
+    }
+
+    #[test]
+    fn jit_defn_recursion_fib() {
+        let src = r#"
+            (defn fib [n: i32] -> i32
+              (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+            (fib 10)
+        "#;
+        assert_eq!(jit_i32_prog(src).unwrap(), 55);
+    }
+
+    #[test]
+    fn jit_defn_multiple() {
+        let src = r#"
+            (defn double [x: i32] -> i32 (* x 2))
+            (defn quad [x: i32] -> i32 (double (double x)))
+            (quad 5)
+        "#;
+        assert_eq!(jit_i32_prog(src).unwrap(), 20);
+    }
+
+    #[test]
+    fn jit_defn_with_let_in_body() {
+        let src = r#"
+            (defn sum-sq [a: i32 b: i32] -> i32
+              (let aa (* a a)
+                (let bb (* b b)
+                  (+ aa bb))))
+            (sum-sq 3 4)
+        "#;
+        assert_eq!(jit_i32_prog(src).unwrap(), 25);
+    }
+
+    #[test]
+    fn jit_call_undefined_function_errors() {
+        // No defn for `nope`; the call should surface a clean error.
+        let err = jit_i32_prog("(nope 1 2)").unwrap_err();
+        assert!(
+            err.contains("undefined function") || err.contains("nope"),
+            "expected undefined-function error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn jit_call_wrong_arity_errors() {
+        let src = r#"
+            (defn id [x: i32] -> i32 x)
+            (id 1 2)
+        "#;
+        let err = jit_i32_prog(src).unwrap_err();
+        assert!(
+            err.contains("expects") && err.contains("arguments"),
+            "expected arity error, got: {}",
+            err
+        );
+    }
+
     #[test]
     fn jit_unsupported_node_is_error_not_panic() {
         // Anything outside Step 6's scope must return Err so that the
