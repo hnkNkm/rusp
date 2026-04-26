@@ -282,6 +282,12 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                 }
             }
 
+            // Exhaustiveness check after per-arm type checking, so per-arm
+            // type errors take precedence over a less-specific exhaustiveness
+            // message.
+            let arm_pats: Vec<&Pattern> = arms.iter().map(|(p, _)| p).collect();
+            crate::exhaustiveness::check(&scrutinee_type, &arm_pats)?;
+
             // Parser guarantees at least one arm, but be defensive.
             result_type.ok_or_else(|| "match has no arms".to_string())
         }

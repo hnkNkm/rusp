@@ -1,6 +1,7 @@
 mod ast;
 mod env;
 mod eval;
+mod exhaustiveness;
 mod parser;
 mod types;
 

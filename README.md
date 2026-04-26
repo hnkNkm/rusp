@@ -243,6 +243,18 @@ Type 'exit' or press Ctrl+C to quit
 - `(as <pat> <name>)` — `<pat>` にマッチしつつ、値全体を `<name>` でも束縛
 - `(guard <pat> <expr>)` — `<pat>` にマッチしつつ、`<expr>`（bool）が真のときだけ成立。`<pat>` で束縛した変数は `<expr>` 内で使える
 
+`Bool` と `List<T>` を scrutinee にした `match` は **型チェック時に網羅性を検証** します。ケースが漏れていると不足パターンを示すエラーになります（`_` や変数で全受けすれば回避可）:
+
+```
+> (match (= 1 1) (true "yes"))
+Error: match is not exhaustive: missing patterns: false
+
+> (match (list 1 2) (nil 0))
+Error: match is not exhaustive: missing patterns: (cons _ _)
+```
+
+ガード付きアーム (`(guard ...)`) は実行時にしか真偽が決まらないため、網羅性判定の根拠にはなりません。
+
 ```lisp
 > (match 1 (1 "one") (2 "two") (_ "other"))
 "one": String
