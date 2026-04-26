@@ -397,6 +397,58 @@ Error: 99999999999999999999 is out of i32 range
 - [ ] トレイトシステム
 - [ ] マクロシステム
 
+## LLVMバックエンド (MVP)
+
+Ruspはツリーウォーク型のインタプリタに加え、LLVMによるJITコンパイルとAOTコンパイルをサポートします (MVPスコープ: スカラ型・関数・再帰のみ。`List` / `match` / `String` は対象外)。
+
+### `--llvm` REPL (JIT)
+
+```bash
+cargo run -- --llvm
+```
+
+通常のREPLと同じ操作感で、各式が LLVM IR にコード生成され、JITで実行されます。型エラーは従来通り検査段階で報告されます。
+
+```lisp
+> (+ 1 2)
+3: i32
+> (defn sq [n: i32] -> i32 (* n n))
+> (sq 7)
+49: i32
+> (let twice (fn [x: i32] -> i32 (* x 2)) (twice 21))
+42: i32
+```
+
+`defn` は型環境とJIT再エミット用バッファに登録され、後続の式呼び出し時に再コード生成されます。
+
+### `rusp build` (AOT)
+
+ソースファイルを LLVM IR (`.ll`) または ネイティブオブジェクト (`.o`) にコンパイルします。ファイルは `defn` の連続で、最後に `(defn main [] -> i32 ...)` を含む必要があります。
+
+```bash
+# LLVM IRを書き出す
+cargo run -- build hello.rusp --emit ll
+# ネイティブオブジェクトを書き出す
+cargo run -- build hello.rusp --emit obj
+# リンクして実行ファイルを作成
+cc hello.rusp.o -o hello
+./hello; echo $?   # main の戻り値が exit code
+```
+
+例 (`hello.rusp`):
+
+```lisp
+(defn sq [n: i32] -> i32 (* n n))
+(defn main [] -> i32 (sq 6))
+```
+
+### MVPスコープ
+
+- 対応: `i32` / `i64` / `f64` / `bool` リテラル、整数・浮動小数点演算、比較、`if`、`and` / `or` / `not`、`let`-in、`defn` (相互参照・再帰可)、キャプチャ無しラムダ `(fn [...] -> T body)`
+- 非対応: `List` / `cons` / `nil`、`match`、`String`、ラムダの自由変数キャプチャ、ラムダの戻り型推論
+
+これらは将来のリリースで追加予定です。
+
 ## 開発
 
 ### ビルド
