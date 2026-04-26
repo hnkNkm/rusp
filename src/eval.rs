@@ -241,6 +241,12 @@ fn pattern_match(pattern: &Pattern, value: &Value, env: &mut Environment) -> boo
             };
             pattern_match(head_pat, &head, env) && pattern_match(tail_pat, &tail, env)
         }
+        // Match the inner pattern first; only bind the alias if it
+        // succeeds so failed branches don't leak the alias.
+        (Pattern::As(inner, name), v) if pattern_match(inner, v, env) => {
+            env.set(name.clone(), v.clone());
+            true
+        }
         _ => false,
     }
 }

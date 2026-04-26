@@ -646,6 +646,7 @@ fn check_pattern(pattern: &Pattern, scrutinee: &Type) -> Result<(), String> {
             }
             _ => Err(format!("cons pattern requires a list, got {}", scrutinee)),
         },
+        Pattern::As(inner, _) => check_pattern(inner, scrutinee),
     }
 }
 
@@ -671,6 +672,12 @@ fn bind_pattern(pattern: &Pattern, scrutinee: &Type, env: &mut TypeEnv) {
             };
             bind_pattern(head, &head_ty, env);
             bind_pattern(tail, &tail_ty, env);
+        }
+        Pattern::As(inner, name) => {
+            // Alias gets the whole scrutinee; the inner pattern adds any
+            // sub-bindings on top.
+            env.insert(name.clone(), scrutinee.clone());
+            bind_pattern(inner, scrutinee, env);
         }
     }
 }

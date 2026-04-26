@@ -1050,4 +1050,121 @@ mod tests {
         let result = type_check_str("(match 1 ((cons h t) h) (_ 0))");
         assert!(result.is_err());
     }
+
+    // ======================================================================
+    // (list ...) pattern — desugars to cons-chain + nil
+    // ======================================================================
+
+    #[test]
+    fn test_eval_match_list_pattern_empty() {
+        let result = eval_str("(match nil ((list) \"empty\") (_ \"other\"))").unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "empty"),
+            _ => panic!("Expected String"),
+        }
+    }
+
+    #[test]
+    fn test_eval_match_list_pattern_fixed_length() {
+        // (list a b c) matches exactly-3-element lists and binds positions.
+        let result = eval_str(
+            "(match (list 10 20 30) ((list a b c) (+ a (+ b c))) (_ -1))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(60)));
+    }
+
+    #[test]
+    fn test_eval_match_list_pattern_length_mismatch_falls_through() {
+        // (list a b c) should NOT match a 2-element list.
+        let result = eval_str(
+            "(match (list 1 2) ((list a b c) a) (_ 99))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(99)));
+    }
+
+    #[test]
+    fn test_eval_match_list_pattern_with_literals() {
+        // Positional literal matching.
+        let result = eval_str(
+            "(match (list 1 2 3) ((list 1 _ _) \"starts-with-one\") (_ \"other\"))",
+        )
+        .unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "starts-with-one"),
+            _ => panic!("Expected String"),
+        }
+    }
+
+    #[test]
+    fn test_type_check_match_list_pattern_binds_elements() {
+        // (list a b) binds both to the element type (i32 here).
+        let ty = type_check_str(
+            "(match (list 1 2) ((list a b) (+ a b)) (_ 0))",
+        )
+        .unwrap();
+        assert_eq!(ty, Type::I32);
+    }
+
+    // ======================================================================
+    // (as <pattern> <name>) — alias binding
+    // ======================================================================
+
+    #[test]
+    fn test_eval_match_as_pattern_binds_whole() {
+        // `xs` gets bound to the entire matched list, not just the head.
+        let result = eval_str(
+            "(match (list 1 2 3) \
+               ((as (cons _ _) xs) (length xs)) \
+               (_ 0))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(3)));
+    }
+
+    #[test]
+    fn test_eval_match_as_pattern_on_literal() {
+        // `n` bound to the matched value even though the inner pattern is a literal.
+        let result = eval_str(
+            "(match 42 ((as 42 n) (+ n 1)) (_ 0))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(43)));
+    }
+
+    #[test]
+    fn test_eval_match_as_pattern_no_bind_on_failure() {
+        // When the inner pattern fails, the alias must not leak a binding
+        // into the arm. We verify by letting a later arm match and ensuring
+        // the arm we enter has no stale `n` visible (it's a fresh scope
+        // anyway, but this exercises the code path).
+        let result = eval_str(
+            "(match 99 ((as 42 n) n) (_ 0))",
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer32(0)));
+    }
+
+    #[test]
+    fn test_type_check_match_as_pattern() {
+        // Alias type is the scrutinee type (i32), usable in the body.
+        let ty = type_check_str(
+            "(match 7 ((as _ n) (+ n 1)))",
+        )
+        .unwrap();
+        assert_eq!(ty, Type::I32);
+    }
+
+    #[test]
+    fn test_type_check_match_as_pattern_wraps_cons() {
+        // Inner cons pattern binds head; alias gets the full list type.
+        let ty = type_check_str(
+            "(match (list 1 2 3) \
+               ((as (cons h _) xs) (+ h (length xs))) \
+               (_ 0))",
+        )
+        .unwrap();
+        assert_eq!(ty, Type::I32);
+    }
 }

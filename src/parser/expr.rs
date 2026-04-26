@@ -365,26 +365,67 @@ fn parse_pattern(
     input: &str,
 ) -> IResult<&str, crate::ast::Pattern, crate::parser::error::ParseError> {
     let (input, _) = multispace0(input)?;
-    alt((parse_cons_pattern, parse_atom_pattern))(input)
+    alt((parse_compound_pattern, parse_atom_pattern))(input)
 }
 
-/// `(cons <head-pat> <tail-pat>)` — nested patterns supported.
-fn parse_cons_pattern(
+/// Compound, parenthesized patterns: `(cons ...)`, `(list ...)`, `(as ...)`.
+///
+/// Dispatches on the head keyword. `(list ...)` desugars to a `cons`-chain
+/// terminated by `nil`, so we don't add a new AST node for it.
+fn parse_compound_pattern(
     input: &str,
 ) -> IResult<&str, crate::ast::Pattern, crate::parser::error::ParseError> {
     let (input, _) = char('(')(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = tag("cons")(input)?;
-    let (input, _) = multispace1(input)?;
-    let (input, head) = parse_pattern(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, tail) = parse_pattern(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
-    Ok((
-        input,
-        crate::ast::Pattern::Cons(Box::new(head), Box::new(tail)),
-    ))
+    let (input, head) = parse_symbol_name(input)?;
+    match head.as_str() {
+        "cons" => {
+            let (input, _) = multispace1(input)?;
+            let (input, h) = parse_pattern(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, t) = parse_pattern(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, _) = char(')')(input)?;
+            Ok((
+                input,
+                crate::ast::Pattern::Cons(Box::new(h), Box::new(t)),
+            ))
+        }
+        "list" => {
+            // Zero or more sub-patterns, then `)`.
+            let (input, items) =
+                many0(preceded(multispace0, parse_pattern))(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, _) = char(')')(input)?;
+            // Desugar: (list p1 p2 p3) => (cons p1 (cons p2 (cons p3 nil)))
+            let folded = items.into_iter().rev().fold(
+                crate::ast::Pattern::Nil,
+                |tail, head| {
+                    crate::ast::Pattern::Cons(Box::new(head), Box::new(tail))
+                },
+            );
+            Ok((input, folded))
+        }
+        "as" => {
+            // (as <pattern> <name>)
+            let (input, _) = multispace1(input)?;
+            let (input, inner) = parse_pattern(input)?;
+            let (input, _) = multispace1(input)?;
+            let (input, name) = parse_symbol_name(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, _) = char(')')(input)?;
+            Ok((
+                input,
+                crate::ast::Pattern::As(Box::new(inner), name),
+            ))
+        }
+        other => Err(nom::Err::Failure(
+            crate::parser::error::ParseError::UnexpectedInput(format!(
+                "unknown compound pattern: ({} ...)",
+                other
+            )),
+        )),
+    }
 }
 
 /// Atom-level pattern: literals, wildcard, nil, or variable binding.

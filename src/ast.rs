@@ -59,6 +59,10 @@ pub enum Pattern {
     LiteralString(String),
     Nil,                                    // nil / ()
     Cons(Box<Pattern>, Box<Pattern>),       // (cons head tail)
+    /// `(<pat> as name)` — match `<pat>` and additionally bind the whole
+    /// matched value to `name`. Not a sugar because the outer binding
+    /// needs the full value, not a subpart.
+    As(Box<Pattern>, String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +196,7 @@ impl fmt::Display for Pattern {
             Pattern::LiteralString(s) => write!(f, "\"{}\"", s),
             Pattern::Nil => write!(f, "nil"),
             Pattern::Cons(head, tail) => write!(f, "(cons {} {})", head, tail),
+            Pattern::As(inner, name) => write!(f, "({} as {})", inner, name),
         }
     }
 }
