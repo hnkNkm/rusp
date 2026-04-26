@@ -1,18 +1,10 @@
-mod ast;
-mod env;
-mod eval;
-mod exhaustiveness;
-mod parser;
-mod types;
-
-#[cfg(test)]
-mod tests;
-
 use std::io::{self, Write};
 
-use env::Environment;
-use eval::eval;
-use types::{type_check, TypeEnv};
+use rusp::ast;
+use rusp::env::{self, Environment};
+use rusp::eval::eval;
+use rusp::parser;
+use rusp::types::{type_check, TypeEnv};
 
 fn main() {
     println!("Rusp REPL v0.1.0");

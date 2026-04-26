@@ -25,18 +25,25 @@
           packages = [
             rustToolchain
             pkgs.pkg-config
+            pkgs.llvmPackages_18.llvm.dev
+            pkgs.libffi
+            pkgs.libxml2
+            pkgs.zlib
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.libiconv
           ];
 
           env = {
             RUST_BACKTRACE = "1";
+            # llvm-sys (transitive dep of inkwell) finds llvm-config via this prefix.
+            LLVM_SYS_181_PREFIX = "${pkgs.llvmPackages_18.llvm.dev}";
           };
 
           shellHook = ''
             echo "Rusp dev shell"
             echo "  $(rustc --version)"
             echo "  $(cargo --version)"
+            echo "  $(${pkgs.llvmPackages_18.llvm.dev}/bin/llvm-config --version | head -c 32) (LLVM)"
           '';
         };
       });

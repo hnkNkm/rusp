@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 nom = "7.1"
+inkwell = { version = "0.9", features = ["llvm18-1"] }
