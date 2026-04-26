@@ -1263,4 +1263,110 @@ mod tests {
         .unwrap_err();
         assert!(err.contains('y'), "expected undefined-var error, got: {}", err);
     }
+
+    // ======================================================================
+    // Exhaustiveness checking
+    // ======================================================================
+
+    #[test]
+    fn test_exhaustive_bool_ok() {
+        // Both true and false covered → exhaustive.
+        let ty = type_check_str("(match (= 1 1) (true 1) (false 2))").unwrap();
+        assert_eq!(ty, Type::I32);
+    }
+
+    #[test]
+    fn test_exhaustive_bool_missing_false() {
+        // Only `true` arm; `false` is missing.
+        let err = type_check_str("(match (= 1 1) (true 1))").unwrap_err();
+        assert!(
+            err.contains("not exhaustive") && err.contains("false"),
+            "expected missing-false error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_exhaustive_bool_wildcard_ok() {
+        // Wildcard covers both bool values.
+        let ty = type_check_str("(match (= 1 1) (true 1) (_ 2))").unwrap();
+        assert_eq!(ty, Type::I32);
+    }
+
+    #[test]
+    fn test_exhaustive_list_ok() {
+        // nil + (cons _ _) covers both list constructors.
+        let ty = type_check_str(
+            "(match (list 1 2) (nil 0) ((cons _ _) 1))",
+        )
+        .unwrap();
+        assert_eq!(ty, Type::I32);
+    }
+
+    #[test]
+    fn test_exhaustive_list_missing_nil() {
+        // Only cons arm; nil is missing.
+        let err = type_check_str("(match (list 1 2) ((cons _ _) 1))").unwrap_err();
+        assert!(
+            err.contains("not exhaustive") && err.contains("nil"),
+            "expected missing-nil error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_exhaustive_list_missing_cons() {
+        // Only nil arm; cons is missing.
+        let err = type_check_str("(match (list 1 2) (nil 0))").unwrap_err();
+        assert!(
+            err.contains("not exhaustive") && err.contains("cons"),
+            "expected missing-cons error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_exhaustive_nested_list_bool_partial() {
+        // List<Bool> with nil and (cons true _) — missing (cons false _).
+        let err = type_check_str(
+            "(match (list true) (nil 0) ((cons true _) 1))",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not exhaustive") && err.contains("cons") && err.contains("false"),
+            "expected missing (cons false _) error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_exhaustive_inferred_skipped() {
+        // When the scrutinee type is Inferred (parameter type `_`), the
+        // exhaustiveness check skips silently. This avoids false positives
+        // before bidirectional inference (#8) lands. We use a lambda with
+        // an inferred parameter type so the return type is also inferred —
+        // the only thing under test is that the non-exhaustive `match`
+        // inside does not raise an exhaustiveness error.
+        let ty = type_check_str(
+            "(fn [xs: _] (match xs ((cons _ _) 1)))",
+        )
+        .unwrap();
+        assert!(matches!(ty, Type::Function { .. }));
+    }
+
+    #[test]
+    fn test_exhaustive_guard_does_not_count() {
+        // A guarded arm cannot satisfy exhaustiveness because its truth
+        // value is only known at runtime. Even though `(guard true ...)`
+        // structurally names `true`, the arm is not considered to cover it.
+        let err = type_check_str(
+            "(match (= 1 1) ((guard true (= 1 1)) 1) (false 2))",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not exhaustive") && err.contains("true"),
+            "expected missing-true error (guard does not count), got: {}",
+            err
+        );
+    }
 }
