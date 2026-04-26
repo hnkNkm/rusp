@@ -247,6 +247,18 @@ fn pattern_match(pattern: &Pattern, value: &Value, env: &mut Environment) -> boo
             env.set(name.clone(), v.clone());
             true
         }
+        (Pattern::Guard(inner, guard_expr), v) => {
+            // Inner pattern first so its bindings are visible to the guard.
+            // If the guard returns false (or, defensively, anything else), the
+            // arm fails and the caller's per-arm env extension is discarded —
+            // see the Match arm in `eval`.
+            if !pattern_match(inner, v, env) {
+                return false;
+            }
+            // Type checker rejects non-bool guard expressions, so any other
+            // result here is treated as a failed match defensively.
+            matches!(eval(guard_expr, env), Ok(Value::Bool(true)))
+        }
         _ => false,
     }
 }

@@ -63,6 +63,10 @@ pub enum Pattern {
     /// matched value to `name`. Not a sugar because the outer binding
     /// needs the full value, not a subpart.
     As(Box<Pattern>, String),
+    /// `(guard <pat> <expr>)` — match `<pat>` and additionally require
+    /// `<expr>` to evaluate to `true` in the env extended with `<pat>`'s
+    /// bindings. Used to express conditional pattern arms without nesting `if`.
+    Guard(Box<Pattern>, Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +201,7 @@ impl fmt::Display for Pattern {
             Pattern::Nil => write!(f, "nil"),
             Pattern::Cons(head, tail) => write!(f, "(cons {} {})", head, tail),
             Pattern::As(inner, name) => write!(f, "({} as {})", inner, name),
+            Pattern::Guard(inner, expr) => write!(f, "(guard {} {})", inner, expr),
         }
     }
 }

@@ -419,6 +419,19 @@ fn parse_compound_pattern(
                 crate::ast::Pattern::As(Box::new(inner), name),
             ))
         }
+        "guard" => {
+            // (guard <pattern> <bool-expr>)
+            let (input, _) = multispace1(input)?;
+            let (input, inner) = parse_pattern(input)?;
+            let (input, _) = multispace1(input)?;
+            let (input, guard_expr) = parse_expr(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, _) = char(')')(input)?;
+            Ok((
+                input,
+                crate::ast::Pattern::Guard(Box::new(inner), Box::new(guard_expr)),
+            ))
+        }
         other => Err(nom::Err::Failure(
             crate::parser::error::ParseError::UnexpectedInput(format!(
                 "unknown compound pattern: ({} ...)",

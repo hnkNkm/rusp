@@ -265,7 +265,7 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
             // sibling arms don't see them.
             let mut result_type: Option<Type> = None;
             for (pat, body) in arms {
-                check_pattern(pat, &scrutinee_type)?;
+                check_pattern(pat, &scrutinee_type, env)?;
                 let mut arm_env = env.extend();
                 bind_pattern(pat, &scrutinee_type, &mut arm_env);
                 let body_type = type_check(body, &mut arm_env)?;
@@ -590,8 +590,14 @@ fn expect_function(ty: &Type, op: &str) -> Result<(Vec<Type>, Type), String> {
 ///
 /// Wildcards and variables match anything. Literal patterns must match
 /// their primitive type. `nil` and `cons` require the scrutinee to be
-/// a list type (or Inferred).
-fn check_pattern(pattern: &Pattern, scrutinee: &Type) -> Result<(), String> {
+/// a list type (or Inferred). `guard` requires its expression to be
+/// `bool` when type-checked with the inner pattern's bindings in scope —
+/// hence the `env` parameter.
+fn check_pattern(
+    pattern: &Pattern,
+    scrutinee: &Type,
+    env: &mut TypeEnv,
+) -> Result<(), String> {
     match pattern {
         Pattern::Wildcard | Pattern::Variable(_) => Ok(()),
         Pattern::LiteralI32(_) => {
@@ -635,18 +641,33 @@ fn check_pattern(pattern: &Pattern, scrutinee: &Type) -> Result<(), String> {
         },
         Pattern::Cons(head, tail) => match scrutinee {
             Type::List(elem) => {
-                check_pattern(head, elem)?;
-                check_pattern(tail, scrutinee)?;
+                check_pattern(head, elem, env)?;
+                check_pattern(tail, scrutinee, env)?;
                 Ok(())
             }
             Type::Inferred => {
-                check_pattern(head, &Type::Inferred)?;
-                check_pattern(tail, &Type::Inferred)?;
+                check_pattern(head, &Type::Inferred, env)?;
+                check_pattern(tail, &Type::Inferred, env)?;
                 Ok(())
             }
             _ => Err(format!("cons pattern requires a list, got {}", scrutinee)),
         },
-        Pattern::As(inner, _) => check_pattern(inner, scrutinee),
+        Pattern::As(inner, _) => check_pattern(inner, scrutinee, env),
+        Pattern::Guard(inner, guard_expr) => {
+            // Inner pattern must itself be valid against the scrutinee type.
+            check_pattern(inner, scrutinee, env)?;
+            // The guard expression sees the inner pattern's bindings, so
+            // type-check it in an extended env. Bindings are scoped to the
+            // guard check and the arm body (the caller already extends env
+            // for the body, so we don't pollute its env here).
+            let mut guard_env = env.extend();
+            bind_pattern(inner, scrutinee, &mut guard_env);
+            let ty = type_check(guard_expr, &mut guard_env)?;
+            if !types_match(&ty, &Type::Bool) {
+                return Err(format!("guard expression must be Bool, got {}", ty));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -677,6 +698,10 @@ fn bind_pattern(pattern: &Pattern, scrutinee: &Type, env: &mut TypeEnv) {
             // Alias gets the whole scrutinee; the inner pattern adds any
             // sub-bindings on top.
             env.insert(name.clone(), scrutinee.clone());
+            bind_pattern(inner, scrutinee, env);
+        }
+        Pattern::Guard(inner, _) => {
+            // Guard expr does not introduce bindings; the inner pattern does.
             bind_pattern(inner, scrutinee, env);
         }
     }
