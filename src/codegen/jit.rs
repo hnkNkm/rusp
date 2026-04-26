@@ -132,7 +132,7 @@ fn split_program(forms: &[Expr]) -> Result<(Vec<&Expr>, &Expr), JitError> {
 /// recursive calls resolve. Parameters become entries in the body's
 /// `env`. The body must produce a value matching the declared return
 /// type.
-fn emit_defn<'ctx>(
+pub(crate) fn emit_defn<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
     builder: &Builder<'ctx>,

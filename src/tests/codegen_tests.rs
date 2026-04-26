@@ -584,4 +584,67 @@ mod tests {
             err
         );
     }
+
+    // -------- Step 10: AOT (compile_to_ll) --------
+
+    #[test]
+    fn aot_emits_ll_with_defns_and_main() {
+        let src = r#"
+            (defn sq [n: i32] -> i32 (* n n))
+            (defn main [] -> i32 (sq 6))
+        "#;
+        let forms = parse_program(src);
+        let ir = codegen::compile_to_ll(&forms).unwrap();
+        // Both functions should appear in the textual IR.
+        assert!(ir.contains("define i32 @sq("), "missing sq: {}", ir);
+        assert!(ir.contains("define i32 @main("), "missing main: {}", ir);
+        // sq should be called from main.
+        assert!(ir.contains("call i32 @sq"), "missing call to sq: {}", ir);
+    }
+
+    #[test]
+    fn aot_rejects_program_without_main() {
+        let forms = parse_program("(defn sq [n: i32] -> i32 (* n n))");
+        let err = codegen::compile_to_ll(&forms).unwrap_err();
+        assert!(
+            err.contains("must be named `main`"),
+            "expected main-required error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn aot_rejects_main_with_wrong_return_type() {
+        let forms = parse_program("(defn main [] -> bool true)");
+        let err = codegen::compile_to_ll(&forms).unwrap_err();
+        assert!(
+            err.contains("must return `i32`"),
+            "expected return-type error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn aot_rejects_main_with_params() {
+        let forms = parse_program("(defn main [x: i32] -> i32 x)");
+        let err = codegen::compile_to_ll(&forms).unwrap_err();
+        assert!(
+            err.contains("zero parameters"),
+            "expected zero-params error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn aot_rejects_non_defn_form() {
+        // A trailing expression is rejected by AOT mode, even if it
+        // would type-check fine.
+        let forms = parse_program("(defn main [] -> i32 0) 42");
+        let err = codegen::compile_to_ll(&forms).unwrap_err();
+        assert!(
+            err.contains("not a `defn`") || err.contains("must be named `main`"),
+            "expected defn-only error, got: {}",
+            err
+        );
+    }
 }

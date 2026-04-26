@@ -8,15 +8,27 @@ use rusp::parser;
 use rusp::types::{type_check, TypeEnv};
 
 fn main() {
-    // CLI: `--llvm` switches the evaluation backend from the tree-walking
-    // interpreter to the LLVM JIT. Type checking still runs on every form
-    // so the user gets the same diagnostics either way.
+    // CLI dispatch:
+    //   rusp                       → REPL (tree-walking interpreter)
+    //   rusp --llvm                → REPL (LLVM JIT)
+    //   rusp build FILE --emit ll  → write FILE.ll
+    //   rusp build FILE --emit obj → write FILE.o
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(first) = args.first()
+        && first == "build"
+    {
+        if let Err(e) = run_build(&args[1..]) {
+            eprintln!("rusp build: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let use_llvm = args.iter().any(|a| a == "--llvm");
     let unknown: Vec<&String> = args.iter().filter(|a| a.as_str() != "--llvm").collect();
     if !unknown.is_empty() {
         eprintln!("Rusp: unknown argument(s): {:?}", unknown);
-        eprintln!("Usage: rusp [--llvm]");
+        eprintln!("Usage: rusp [--llvm] | rusp build FILE --emit ll|obj");
         std::process::exit(2);
     }
 
@@ -151,6 +163,80 @@ fn process_input(
     let value = eval(&ast, env)?;
 
     Ok((value, ty))
+}
+
+/// `rusp build FILE --emit ll|obj` — read source, type-check every
+/// form, and emit either textual LLVM IR or a native object.
+///
+/// The source must be a sequence of `defn`s ending with
+/// `(defn main [] -> i32 ...)`; that defn becomes the C-ABI entry
+/// point, so `cc out.o -o out` is enough to make an executable.
+fn run_build(args: &[String]) -> Result<(), String> {
+    // Parse the sub-arg vector. We expect: <file> --emit <kind>.
+    let mut file: Option<&String> = None;
+    let mut emit: Option<&String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--emit" => {
+                i += 1;
+                emit = args.get(i);
+                if emit.is_none() {
+                    return Err("--emit requires an argument (ll|obj)".into());
+                }
+            }
+            other if !other.starts_with("--") => {
+                if file.is_some() {
+                    return Err(format!("unexpected positional argument: {}", other));
+                }
+                file = Some(&args[i]);
+            }
+            other => return Err(format!("unknown flag: {}", other)),
+        }
+        i += 1;
+    }
+    let file = file.ok_or("missing input file. Usage: rusp build FILE --emit ll|obj")?;
+    let emit = emit.ok_or("missing --emit. Usage: rusp build FILE --emit ll|obj")?;
+
+    let source = std::fs::read_to_string(file)
+        .map_err(|e| format!("could not read {}: {}", file, e))?;
+
+    // Parse all top-level forms. The single-form `parser::parse` rejects
+    // trailing input, so we drive `parse_expr` in a loop.
+    let mut forms: Vec<Expr> = Vec::new();
+    let mut rest = source.trim();
+    while !rest.is_empty() {
+        let (remaining, expr) = parser::expr::parse_expr(rest)
+            .map_err(|e| format!("parse error: {}", e))?;
+        forms.push(expr);
+        rest = remaining.trim();
+    }
+
+    // Type-check every form against a shared TypeEnv so `defn`s can
+    // reference each other.
+    let mut type_env = TypeEnv::new();
+    for f in &forms {
+        rusp::types::type_check(f, &mut type_env)
+            .map_err(|e| format!("type error: {}", e))?;
+    }
+
+    match emit.as_str() {
+        "ll" => {
+            let ir = codegen::compile_to_ll(&forms)?;
+            let out_path = format!("{}.ll", file);
+            std::fs::write(&out_path, ir)
+                .map_err(|e| format!("could not write {}: {}", out_path, e))?;
+            eprintln!("wrote {}", out_path);
+            Ok(())
+        }
+        "obj" => {
+            let out_path = format!("{}.o", file);
+            codegen::compile_to_obj(&forms, std::path::Path::new(&out_path))?;
+            eprintln!("wrote {}", out_path);
+            Ok(())
+        }
+        other => Err(format!("--emit: expected `ll` or `obj`, got `{}`", other)),
+    }
 }
 
 /// `--llvm` REPL pipeline.
