@@ -231,6 +231,26 @@ Type 'exit' or press Ctrl+C to quit
 (11 21 31): List<i32>
 ```
 
+### `_` パラメータの文脈推論 (Bidirectional Inference)
+
+トップレベルの型注釈に `_` を書いた関数パラメータは、本体内での **使われ方** を見て自動的に絞り込まれます (Rust 流の双方向型推論)。`fold` / `map` / `filter` のラムダ引数型、`length` / `car` / `cdr` / `null?` などのリスト操作、`match` の `cons` パターンが手がかりになります。
+
+```lisp
+; xs: _ は fold のラムダ第 2 引数 (i32) から List<i32> に絞られる
+> (defn sum [xs: _] -> i32
+    (fold (fn [a: i32 x: i32] -> i32 (+ a x)) 0 xs))
+#<function:1>: fn(List<i32>) -> i32
+
+> (sum (list 1 2 3 4 5))
+15: i32
+
+; length は要素型までは決められないので List<_> までの絞り込み
+> (defn len [xs: _] -> i32 (length xs))
+#<function:2>: fn(List<_>) -> i32
+```
+
+絞り込み後のシグネチャは外から見える型に反映されるので、要素型が合わない呼び出しは型エラーになります。同一パラメータが矛盾する型に絞られた場合も型エラーで検出されます。
+
 ### パターンマッチング
 `match` 式でスカラーやリストを構造分解できます。対応パターン:
 

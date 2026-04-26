@@ -4,6 +4,11 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
     types: HashMap<String, Type>,
+    /// Bidirectional inference (段階 A): records the concrete types into
+    /// which `Inferred` parameters were narrowed during body type-checking.
+    /// `Defn` reads this back to refine its registered function signature
+    /// after the body is checked.
+    pub refinements: HashMap<String, Type>,
 }
 
 impl TypeEnv {
@@ -120,20 +125,71 @@ impl TypeEnv {
             return_type: Box::new(Type::Inferred),
         });
         
-        TypeEnv { types }
+        TypeEnv { types, refinements: HashMap::new() }
     }
-    
+
     pub fn get(&self, name: &str) -> Option<&Type> {
         self.types.get(name)
     }
-    
+
     pub fn insert(&mut self, name: String, ty: Type) {
         self.types.insert(name, ty);
     }
-    
+
     pub fn extend(&self) -> Self {
+        // Child scope inherits known types but starts with a fresh
+        // refinements map. Each function body is its own refinement
+        // scope; `Defn` lifts only the params it cares about.
         TypeEnv {
             types: self.types.clone(),
+            refinements: HashMap::new(),
+        }
+    }
+
+    /// Bidirectional inference (段階 A): narrow `name`'s type to `ty`.
+    ///
+    /// - If `name` is unknown, no-op (only call this for known variables).
+    /// - If `name` is currently `Inferred`, replace with `ty`.
+    /// - If `name` is currently `List<Inferred>` and `ty` is a more concrete
+    ///   list type, replace with `ty`.
+    /// - If `name` is already concrete and matches `ty`, no-op.
+    /// - Otherwise, return a conflict error.
+    pub fn refine(&mut self, name: &str, ty: Type) -> Result<(), String> {
+        let current = match self.types.get(name) {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
+        match current {
+            Type::Inferred => {
+                self.types.insert(name.to_string(), ty.clone());
+                self.refinements.insert(name.to_string(), ty);
+                Ok(())
+            }
+            Type::List(ref inner) if matches!(**inner, Type::Inferred) => {
+                // `List<_>` accepts narrowing to a more concrete list type.
+                if matches!(ty, Type::List(_)) {
+                    self.types.insert(name.to_string(), ty.clone());
+                    self.refinements.insert(name.to_string(), ty);
+                    Ok(())
+                } else if types_match(&current, &ty) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "parameter `{}` was previously {} but now requires {}",
+                        name, current, ty
+                    ))
+                }
+            }
+            existing => {
+                if types_match(&existing, &ty) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "parameter `{}` was previously {} but now requires {}",
+                        name, existing, ty
+                    ))
+                }
+            }
         }
     }
 }
@@ -212,24 +268,43 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                 return_type: Box::new(return_type.clone()),
             };
             env.insert(name.clone(), func_type.clone());
-            
+
             // Now type-check the body with the function in scope
             let mut new_env = env.extend();
-            
+
             for (param_name, param_type) in params {
                 new_env.insert(param_name.clone(), param_type.clone());
             }
-            
+
             let body_type = type_check(body, &mut new_env)?;
-            
-            if &body_type != return_type && return_type != &Type::Inferred {
+
+            if !types_match(&body_type, return_type) && return_type != &Type::Inferred {
                 return Err(format!(
                     "Return type mismatch: expected {}, got {}",
                     return_type, body_type
                 ));
             }
-            
-            Ok(func_type)
+
+            // Bidirectional inference (段階 A): if any `_` parameters were
+            // narrowed during body type-checking, reflect them in the
+            // signature so external callers see the precise type.
+            let refined_params: Vec<Type> = params
+                .iter()
+                .map(|(pname, ptype)| {
+                    new_env
+                        .refinements
+                        .get(pname)
+                        .cloned()
+                        .unwrap_or_else(|| ptype.clone())
+                })
+                .collect();
+            let refined_func_type = Type::Function {
+                params: refined_params,
+                return_type: Box::new(return_type.clone()),
+            };
+            env.insert(name.clone(), refined_func_type.clone());
+
+            Ok(refined_func_type)
         }
         
         Expr::Lambda { params, return_type, body } => {
@@ -258,7 +333,19 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
         }
         
         Expr::Match { scrutinee, arms } => {
-            let scrutinee_type = type_check(scrutinee, env)?;
+            let mut scrutinee_type = type_check(scrutinee, env)?;
+
+            // Bidirectional inference (段階 A): if the scrutinee is a plain
+            // variable that we still see as Inferred, but the arms reveal
+            // structural usage (cons or nil), narrow it to `List<_>` so the
+            // per-arm type checks and exhaustiveness see a real list type.
+            if matches!(scrutinee_type, Type::Inferred)
+                && let Expr::Symbol(sym) = &**scrutinee
+                && arms.iter().any(|(p, _)| is_list_shaped(p))
+            {
+                env.refine(sym, Type::List(Box::new(Type::Inferred)))?;
+                scrutinee_type = Type::List(Box::new(Type::Inferred));
+            }
 
             // Validate each arm. Bindings introduced by the pattern are
             // visible only in that arm's body — we clone the env so
@@ -305,7 +392,7 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                     }
                     
                     let mut actual_return_type = *return_type.clone();
-                    
+
                     for (i, (arg, param_type)) in args.iter().zip(params.iter()).enumerate() {
                         let arg_type = type_check(arg, env)?;
                         // Check type compatibility
@@ -314,6 +401,16 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                                 "Type mismatch in argument: expected {}, got {}",
                                 param_type, arg_type
                             ));
+                        }
+                        // Bidirectional inference (段階 A): if the parameter
+                        // expects a list (any list, possibly `List<_>`) and
+                        // the argument is an `Inferred` symbol, narrow that
+                        // symbol to `List<_>` so subsequent uses see a list.
+                        if matches!(arg_type, Type::Inferred)
+                            && matches!(param_type, Type::List(_))
+                            && let Expr::Symbol(sym) = arg
+                        {
+                            env.refine(sym, Type::List(Box::new(Type::Inferred)))?;
                         }
                         // Special handling for list operations
                         if let Expr::Symbol(fname) = &**func {
@@ -424,6 +521,15 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                                 param_types[0], elem_type
                             ));
                         }
+                        // Bidirectional inference (段階 A): narrow the source
+                        // variable when the list type is still Inferred but
+                        // the lambda's parameter type is concrete.
+                        if matches!(lst_type, Type::Inferred)
+                            && let Expr::Symbol(sym) = &exprs[2]
+                            && !matches!(param_types[0], Type::Inferred)
+                        {
+                            env.refine(sym, Type::List(Box::new(param_types[0].clone())))?;
+                        }
                         // If the function's return type is unresolved, the list
                         // element type is the best guess we have.
                         let result_elem = if ret_type == Type::Inferred {
@@ -462,7 +568,22 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                                 ret_type
                             ));
                         }
-                        Ok(Type::List(Box::new(elem_type)))
+                        // Bidirectional inference (段階 A): narrow the source
+                        // variable from the predicate's parameter type.
+                        if matches!(lst_type, Type::Inferred)
+                            && let Expr::Symbol(sym) = &exprs[2]
+                            && !matches!(param_types[0], Type::Inferred)
+                        {
+                            env.refine(sym, Type::List(Box::new(param_types[0].clone())))?;
+                        }
+                        let result_elem = if matches!(elem_type, Type::Inferred)
+                            && !matches!(param_types[0], Type::Inferred)
+                        {
+                            param_types[0].clone()
+                        } else {
+                            elem_type
+                        };
+                        Ok(Type::List(Box::new(result_elem)))
                     }
                     "fold" => {
                         // (fold f init lst) : B where f : B -> A -> B, init : B, lst : List<A>
@@ -499,6 +620,14 @@ pub fn type_check(expr: &Expr, env: &mut TypeEnv) -> Result<Type, String> {
                                 "fold return type {} does not match accumulator type {}",
                                 ret_type, init_type
                             ));
+                        }
+                        // Bidirectional inference (段階 A): narrow the source
+                        // variable from the lambda's element-parameter type.
+                        if matches!(lst_type, Type::Inferred)
+                            && let Expr::Symbol(sym) = &exprs[3]
+                            && !matches!(param_types[1], Type::Inferred)
+                        {
+                            env.refine(sym, Type::List(Box::new(param_types[1].clone())))?;
                         }
                         // Prefer the concrete init type over any Inferred from
                         // the function's return slot.
@@ -580,6 +709,11 @@ pub fn parse_type(s: &str) -> Result<Type, String> {
 fn expect_list_elem(ty: &Type, op: &str) -> Result<Type, String> {
     match ty {
         Type::List(elem) => Ok(*elem.clone()),
+        // Bidirectional inference (段階 A): an unresolved scrutinee is
+        // accepted here. Caller will narrow the source variable via
+        // `TypeEnv::refine` once the function/lambda parameter types are
+        // known.
+        Type::Inferred => Ok(Type::Inferred),
         _ => Err(format!("{} expects a list, got {}", op, ty)),
     }
 }
@@ -589,6 +723,19 @@ fn expect_function(ty: &Type, op: &str) -> Result<(Vec<Type>, Type), String> {
     match ty {
         Type::Function { params, return_type } => Ok((params.clone(), *return_type.clone())),
         _ => Err(format!("{} expects a function, got {}", op, ty)),
+    }
+}
+
+/// Strip `As` wrappers and report whether the underlying pattern is a
+/// list-shaped constructor (`cons` or `nil`). Used by the bidirectional
+/// scrutinee refinement in `Match` to decide when an `Inferred` scrutinee
+/// can be narrowed to `List<_>`.
+fn is_list_shaped(pat: &Pattern) -> bool {
+    match pat {
+        Pattern::Cons(_, _) | Pattern::Nil => true,
+        Pattern::As(inner, _) => is_list_shaped(inner),
+        Pattern::Guard(inner, _) => is_list_shaped(inner),
+        _ => false,
     }
 }
 
@@ -651,11 +798,13 @@ fn check_pattern(
                 check_pattern(tail, scrutinee, env)?;
                 Ok(())
             }
-            Type::Inferred => {
-                check_pattern(head, &Type::Inferred, env)?;
-                check_pattern(tail, &Type::Inferred, env)?;
-                Ok(())
-            }
+            // After bidirectional refinement (段階 A), an `Inferred`
+            // scrutinee should have been narrowed to `List<_>` before we
+            // get here. Surface a defensive internal error if not — this
+            // signals a missing refinement site rather than a user bug.
+            Type::Inferred => Err(
+                "internal: cons pattern reached Inferred scrutinee — should have been refined".to_string()
+            ),
             _ => Err(format!("cons pattern requires a list, got {}", scrutinee)),
         },
         Pattern::As(inner, _) => check_pattern(inner, scrutinee, env),
