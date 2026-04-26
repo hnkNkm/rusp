@@ -1,4 +1,4 @@
-//! Minimal JIT entry point for Steps 2–5: parse → type-check → codegen → run.
+//! Minimal JIT entry point for Steps 2–6: parse → type-check → codegen → run.
 //!
 //! Supports:
 //! - i32/i64 literals and integer arithmetic (`+`, `-`, `*`, `/`)
@@ -7,6 +7,7 @@
 //! - comparison (`=`, `<`, `>`, `<=`, `>=`) on i32, i64, and f64
 //! - `if` (with phi-merge)
 //! - `and`/`or`/`not` (short-circuit for `and`/`or`, xor for `not`)
+//! - `let`-in (lexical bindings via a flat HashMap; SSA values, no alloca)
 //!
 //! Integer arithmetic / comparison forms infer their width from the
 //! leading operand; the type checker has already enforced that every
@@ -24,6 +25,8 @@ use inkwell::execution_engine::ExecutionEngine;
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue};
 use inkwell::{FloatPredicate, IntPredicate};
+
+use std::collections::HashMap;
 
 use crate::ast::Expr;
 
@@ -131,7 +134,12 @@ fn compile_and_run(
     let entry = context.append_basic_block(function, "entry");
     builder.position_at_end(entry);
 
-    let cg = ExprCg { context, builder: &builder, function };
+    let mut cg = ExprCg {
+        context,
+        builder: &builder,
+        function,
+        env: HashMap::new(),
+    };
     let value = cg.emit(expr)?;
 
     // Width / kind validation: surface mismatches loudly so callers debug
@@ -245,11 +253,16 @@ struct ExprCg<'ctx, 'a> {
     context: &'ctx Context,
     builder: &'a Builder<'ctx>,
     function: FunctionValue<'ctx>,
+    /// Lexical environment for `let`-bound names. Flat (no parent
+    /// chain) because rebinding via shadowing is implemented by
+    /// snapshotting the displaced entry and restoring it after the
+    /// body. SSA-style: each binding maps to a value, not an alloca.
+    env: HashMap<String, EmitVal<'ctx>>,
 }
 
 impl<'ctx, 'a> ExprCg<'ctx, 'a> {
     /// Generate IR for `expr`, returning the resulting SSA value.
-    fn emit(&self, expr: &Expr) -> Result<EmitVal<'ctx>, JitError> {
+    fn emit(&mut self, expr: &Expr) -> Result<EmitVal<'ctx>, JitError> {
         match expr {
             Expr::Integer32(n) => Ok(EmitVal::Int(
                 self.context.i32_type().const_int(*n as u64, true),
@@ -264,6 +277,18 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             Expr::Bool(b) => Ok(EmitVal::Int(
                 self.context.bool_type().const_int(u64::from(*b), false),
             )),
+
+            // Lexical lookup. Operator symbols (e.g. `+`, `<`) never
+            // reach here because they appear as the head of a List
+            // and are handled there; only `let`-bound user names do.
+            Expr::Symbol(name) => self.env.get(name).copied().ok_or_else(|| {
+                format!("--llvm: undefined variable `{}`", name)
+            }),
+
+            // `let-in`: bind value, emit body in extended env, restore.
+            // Top-level `let` (no body) doesn't make sense for a
+            // single-thunk JIT and is rejected here.
+            Expr::Let { name, value, body, .. } => self.emit_let(name, value, body.as_deref()),
 
             // `if` is its own AST node (not a List with "if" symbol).
             Expr::If { condition, then_branch, else_branch } => {
@@ -306,7 +331,7 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
     /// Generate `(op arg0 arg1 ...)` for binary integer arithmetic.
     /// Variadic in source (`(+ 1 2 3)`) is left-folded. Width is taken
     /// from the first operand.
-    fn gen_int_arith(&self, op: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
+    fn gen_int_arith(&mut self, op: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.len() < 2 {
             return Err(format!(
                 "operator `{}` requires at least 2 arguments, got {}",
@@ -314,7 +339,8 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
                 args.len()
             ));
         }
-        let mut acc = self.expect_int(&self.emit(&args[0])?, op)?;
+        let first = self.emit(&args[0])?;
+        let mut acc = self.expect_int(&first, op)?;
         let acc_width = acc.get_type().get_bit_width();
         if acc_width != 32 && acc_width != 64 {
             return Err(format!(
@@ -323,7 +349,8 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             ));
         }
         for arg in &args[1..] {
-            let rhs = self.expect_int(&self.emit(arg)?, op)?;
+            let rhs_v = self.emit(arg)?;
+            let rhs = self.expect_int(&rhs_v, op)?;
             if rhs.get_type().get_bit_width() != acc_width {
                 return Err(format!(
                     "operator `{}`: operand width mismatch (i{} vs i{}) — \
@@ -360,7 +387,7 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
     /// Mirrors `gen_int_arith`. Rusp's float ops are syntactically
     /// distinct from int ones (`+.` vs `+`), so the type checker has
     /// already guaranteed every operand is f64.
-    fn gen_float_arith(&self, op: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
+    fn gen_float_arith(&mut self, op: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.len() < 2 {
             return Err(format!(
                 "operator `{}` requires at least 2 arguments, got {}",
@@ -368,9 +395,11 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
                 args.len()
             ));
         }
-        let mut acc = self.expect_float(&self.emit(&args[0])?, op)?;
+        let first = self.emit(&args[0])?;
+        let mut acc = self.expect_float(&first, op)?;
         for arg in &args[1..] {
-            let rhs = self.expect_float(&self.emit(arg)?, op)?;
+            let rhs_v = self.emit(arg)?;
+            let rhs = self.expect_float(&rhs_v, op)?;
             acc = match op {
                 "+." => self
                     .builder
@@ -399,7 +428,7 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
     /// predicates, floats use ordered predicates (OEQ/OLT/...).
     /// "Ordered" means NaN compares false, matching the interpreter's
     /// IEEE-754 semantics.
-    fn gen_cmp(&self, op: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
+    fn gen_cmp(&mut self, op: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.len() != 2 {
             return Err(format!(
                 "comparison `{}` requires exactly 2 arguments, got {}",
@@ -465,7 +494,7 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
 
     /// Lower `(if c t e)` with a phi at the merge.
     fn emit_if(
-        &self,
+        &mut self,
         cond: &Expr,
         then_e: &Expr,
         else_e: &Expr,
@@ -533,13 +562,44 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
         })
     }
 
+    /// `(let name value body)` — let-in. Bind `name` to the value of
+    /// `value`, emit `body` with that binding visible, then restore the
+    /// previous binding (or remove it). Top-level `let` (no body) is
+    /// rejected here because the JIT compiles a single expression.
+    ///
+    /// Shadowing is supported: if `name` already exists, save the old
+    /// value before inserting and put it back after the body.
+    fn emit_let(
+        &mut self,
+        name: &str,
+        value: &Expr,
+        body: Option<&Expr>,
+    ) -> Result<EmitVal<'ctx>, JitError> {
+        let body = body.ok_or_else(|| {
+            "--llvm: top-level `let` (without body) is not supported in JIT mode".to_string()
+        })?;
+        let val = self.emit(value)?;
+        let prev = self.env.insert(name.to_string(), val);
+        let result = self.emit(body);
+        match prev {
+            Some(old) => {
+                self.env.insert(name.to_string(), old);
+            }
+            None => {
+                self.env.remove(name);
+            }
+        }
+        result
+    }
+
     /// Short-circuit `and`. Variadic: `(and a b c)` is left-folded so
     /// that any false short-circuits to false without evaluating the rest.
-    fn gen_and(&self, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
+    fn gen_and(&mut self, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.is_empty() {
             return Ok(EmitVal::Int(self.context.bool_type().const_int(1, false)));
         }
-        let mut acc = self.expect_bool(&self.emit(&args[0])?, "and")?;
+        let first = self.emit(&args[0])?;
+        let mut acc = self.expect_bool(&first, "and")?;
         for arg in &args[1..] {
             acc = self.short_circuit(acc, arg, ShortCircuit::And)?;
         }
@@ -547,11 +607,12 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
     }
 
     /// Short-circuit `or`. Mirror of `gen_and`.
-    fn gen_or(&self, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
+    fn gen_or(&mut self, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.is_empty() {
             return Ok(EmitVal::Int(self.context.bool_type().const_int(0, false)));
         }
-        let mut acc = self.expect_bool(&self.emit(&args[0])?, "or")?;
+        let first = self.emit(&args[0])?;
+        let mut acc = self.expect_bool(&first, "or")?;
         for arg in &args[1..] {
             acc = self.short_circuit(acc, arg, ShortCircuit::Or)?;
         }
@@ -560,7 +621,7 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
 
     /// Lower `acc OP rhs` as a control-flow short-circuit and phi.
     fn short_circuit(
-        &self,
+        &mut self,
         acc: IntValue<'ctx>,
         rhs_expr: &Expr,
         kind: ShortCircuit,
@@ -579,7 +640,8 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             .map_err(|e| format!("LLVM build_conditional_branch failed: {}", e))?;
 
         self.builder.position_at_end(eval_bb);
-        let rhs = self.expect_bool(&self.emit(rhs_expr)?, kind.name())?;
+        let rhs_v = self.emit(rhs_expr)?;
+        let rhs = self.expect_bool(&rhs_v, kind.name())?;
         let eval_end = self.builder.get_insert_block().expect("eval has insert block");
         self.builder
             .build_unconditional_branch(merge_bb)
@@ -605,14 +667,15 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
     }
 
     /// `(not b)` → `b XOR 1`.
-    fn gen_not(&self, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
+    fn gen_not(&mut self, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.len() != 1 {
             return Err(format!(
                 "`not` requires exactly 1 argument, got {}",
                 args.len()
             ));
         }
-        let v = self.expect_bool(&self.emit(&args[0])?, "not")?;
+        let v_e = self.emit(&args[0])?;
+        let v = self.expect_bool(&v_e, "not")?;
         let one = self.context.bool_type().const_int(1, false);
         let r = self
             .builder

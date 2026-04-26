@@ -290,12 +290,83 @@ mod tests {
         assert!(!err.is_empty());
     }
 
+    // ----------- Step 6: let-in -----------
+
+    #[test]
+    fn jit_let_in_basic_i32() {
+        // (let x 5 x) → 5
+        assert_eq!(jit_i32("(let x 5 x)").unwrap(), 5);
+        // Body uses bound name in arithmetic.
+        assert_eq!(jit_i32("(let x 10 (+ x 1))").unwrap(), 11);
+    }
+
+    #[test]
+    fn jit_let_in_basic_f64() {
+        assert_eq!(jit_f64("(let half 0.5 half)").unwrap(), 0.5);
+        assert_eq!(jit_f64("(let r 2.0 (*. r r))").unwrap(), 4.0);
+    }
+
+    #[test]
+    fn jit_let_in_basic_bool() {
+        assert!(jit_bool("(let p true p)").unwrap());
+        assert!(jit_bool("(let p false (not p))").unwrap());
+    }
+
+    #[test]
+    fn jit_let_in_nested() {
+        // Nested let — outer binding visible inside inner body.
+        assert_eq!(jit_i32("(let x 3 (let y 4 (+ x y)))").unwrap(), 7);
+        // Inner binding shadows outer; body uses inner.
+        assert_eq!(jit_i32("(let x 1 (let x 99 x))").unwrap(), 99);
+    }
+
+    #[test]
+    fn jit_let_in_shadowing_restores() {
+        // After the inner let's body, `x` should refer to the outer binding
+        // again. Achieved by computing `(+ inner outer)` where the outer x
+        // is read after the inner let scope ends.
+        // (let x 10 (+ (let x 1 x) x)) → (+ 1 10) = 11
+        assert_eq!(
+            jit_i32("(let x 10 (+ (let x 1 x) x))").unwrap(),
+            11
+        );
+    }
+
+    #[test]
+    fn jit_let_in_with_if() {
+        // Bound value used in both arms.
+        assert_eq!(
+            jit_i32("(let x 5 (if (< x 10) (* x 2) x))").unwrap(),
+            10
+        );
+    }
+
+    #[test]
+    fn jit_let_in_value_can_use_outer_bindings() {
+        // `value` can reference earlier let-bound names.
+        assert_eq!(
+            jit_i32("(let x 3 (let y (* x 2) y))").unwrap(),
+            6
+        );
+    }
+
+    #[test]
+    fn jit_undefined_variable_is_error() {
+        // No binding for `x` — codegen should reject cleanly.
+        let err = jit_i32("x").unwrap_err();
+        assert!(
+            err.contains("undefined variable"),
+            "expected undefined variable error, got: {}",
+            err
+        );
+    }
+
     #[test]
     fn jit_unsupported_node_is_error_not_panic() {
-        // Anything outside Step 5's scope must return Err so that the
+        // Anything outside Step 6's scope must return Err so that the
         // future `--llvm` REPL surfaces a clean message instead of crashing.
-        // `let-in` lands in Step 6, so it's still unsupported.
-        let err = jit_i32("(let x 1 x)").unwrap_err();
+        // String literals don't have a JIT representation yet.
+        let err = jit_i32(r#""hello""#).unwrap_err();
         assert!(
             err.contains("not supported"),
             "expected unsupported error, got: {}",
