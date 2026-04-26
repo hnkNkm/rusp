@@ -18,4 +18,4 @@ pub fn smoke_module() -> String {
     module.print_to_string().to_string()
 }
 
-pub use jit::{jit_eval_bool, jit_eval_i32, jit_eval_i64, JitError};
+pub use jit::{jit_eval_bool, jit_eval_f64, jit_eval_i32, jit_eval_i64, JitError};

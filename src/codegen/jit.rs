@@ -1,13 +1,14 @@
-//! Minimal JIT entry point for Steps 2–4: parse → type-check → codegen → run.
+//! Minimal JIT entry point for Steps 2–5: parse → type-check → codegen → run.
 //!
 //! Supports:
 //! - i32/i64 literals and integer arithmetic (`+`, `-`, `*`, `/`)
+//! - f64 literals and float arithmetic (`+.`, `-.`, `*.`, `/.`)
 //! - bool literals
-//! - integer comparison (`=`, `<`, `>`, `<=`, `>=`) — i32 and i64
+//! - comparison (`=`, `<`, `>`, `<=`, `>=`) on i32, i64, and f64
 //! - `if` (with phi-merge)
 //! - `and`/`or`/`not` (short-circuit for `and`/`or`, xor for `not`)
 //!
-//! The integer-arithmetic / comparison forms infer their width from the
+//! Integer arithmetic / comparison forms infer their width from the
 //! leading operand; the type checker has already enforced that every
 //! operand of one form shares that width.
 //!
@@ -20,8 +21,9 @@ use inkwell::OptimizationLevel;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
-use inkwell::values::{FunctionValue, IntValue};
-use inkwell::{IntPredicate};
+use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::values::{BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue};
+use inkwell::{FloatPredicate, IntPredicate};
 
 use crate::ast::Expr;
 
@@ -37,14 +39,14 @@ pub fn jit_eval_i32(expr: &Expr) -> Result<i32, JitError> {
     let result = compile_and_run(&context, expr, ReturnKind::I32)?;
     // SAFETY of the cast: the JIT returned an i32 inside a u64 (we trampoline
     // through u64 to keep one signature for both widths). Truncation is safe.
-    Ok(result as i32)
+    Ok(result.as_u64 as i32)
 }
 
 /// Compile and JIT-run `expr` as an `i64`-returning thunk.
 pub fn jit_eval_i64(expr: &Expr) -> Result<i64, JitError> {
     let context = Context::create();
     let result = compile_and_run(&context, expr, ReturnKind::I64)?;
-    Ok(result as i64)
+    Ok(result.as_u64 as i64)
 }
 
 /// Compile and JIT-run `expr` as a `bool`-returning thunk.
@@ -56,16 +58,26 @@ pub fn jit_eval_i64(expr: &Expr) -> Result<i64, JitError> {
 pub fn jit_eval_bool(expr: &Expr) -> Result<bool, JitError> {
     let context = Context::create();
     let result = compile_and_run(&context, expr, ReturnKind::Bool)?;
-    Ok(result != 0)
+    Ok(result.as_u64 != 0)
+}
+
+/// Compile and JIT-run `expr` as an `f64`-returning thunk. Floats can't
+/// trampoline through u64 (different ABI registers, no bitcast at the
+/// boundary), so the float case is handled separately.
+pub fn jit_eval_f64(expr: &Expr) -> Result<f64, JitError> {
+    let context = Context::create();
+    let result = compile_and_run(&context, expr, ReturnKind::F64)?;
+    Ok(result.as_f64)
 }
 
 /// What the top-level thunk should return. Determines the function
-/// signature we emit and the cast applied at the FFI boundary.
+/// signature we emit and how the boundary value is interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReturnKind {
     I32,
     I64,
     Bool,
+    F64,
 }
 
 impl ReturnKind {
@@ -74,27 +86,45 @@ impl ReturnKind {
             ReturnKind::I32 => "i32",
             ReturnKind::I64 => "i64",
             ReturnKind::Bool => "bool",
+            ReturnKind::F64 => "f64",
         }
     }
 }
 
-/// Compile, JIT, and run `__expr` returning a single integer-shaped
-/// value of the requested kind. The actual width affects only the
-/// function signature and the truncation/zero-extension at the
-/// boundary; codegen for the body itself dispatches on the value's
-/// own LLVM type.
+/// Boundary value carrier — `compile_and_run` returns either an integer
+/// (carried in u64) or a float (carried in f64). A union-style struct
+/// works fine here because exactly one field is meaningful per call,
+/// and `ReturnKind` tells the caller which.
+#[derive(Clone, Copy)]
+struct BoundaryValue {
+    as_u64: u64,
+    as_f64: f64,
+}
+
+impl BoundaryValue {
+    fn from_u64(v: u64) -> Self {
+        Self { as_u64: v, as_f64: 0.0 }
+    }
+    fn from_f64(v: f64) -> Self {
+        Self { as_u64: 0, as_f64: v }
+    }
+}
+
+/// Compile, JIT, and run `__expr` returning a single scalar of the
+/// requested kind.
 fn compile_and_run(
     context: &Context,
     expr: &Expr,
     expected: ReturnKind,
-) -> Result<u64, JitError> {
+) -> Result<BoundaryValue, JitError> {
     let module = context.create_module("rusp_jit");
     let builder = context.create_builder();
 
-    let ret_t = match expected {
-        ReturnKind::I32 => context.i32_type(),
-        ReturnKind::I64 => context.i64_type(),
-        ReturnKind::Bool => context.bool_type(),
+    let ret_t: BasicTypeEnum = match expected {
+        ReturnKind::I32 => context.i32_type().into(),
+        ReturnKind::I64 => context.i64_type().into(),
+        ReturnKind::Bool => context.bool_type().into(),
+        ReturnKind::F64 => context.f64_type().into(),
     };
     let fn_t = ret_t.fn_type(&[], false);
     let function = module.add_function("__expr", fn_t, None);
@@ -105,8 +135,8 @@ fn compile_and_run(
     let value = cg.emit(expr)?;
 
     // Width / kind validation: surface mismatches loudly so callers debug
-    // a width problem at the boundary rather than misreading bits.
-    let body_kind = ReturnKind::from_int_value(&value)?;
+    // a kind problem at the boundary rather than misreading bits.
+    let body_kind = value.return_kind()?;
     if body_kind != expected {
         return Err(format!(
             "JIT requested {} but expression produced {}",
@@ -115,16 +145,23 @@ fn compile_and_run(
         ));
     }
 
-    builder
-        .build_return(Some(&value))
-        .map_err(|e| format!("LLVM build_return failed: {}", e))?;
+    match value {
+        EmitVal::Int(iv) => builder
+            .build_return(Some(&iv as &dyn BasicValue))
+            .map(|_| ())
+            .map_err(|e| format!("LLVM build_return failed: {}", e))?,
+        EmitVal::Float(fv) => builder
+            .build_return(Some(&fv as &dyn BasicValue))
+            .map(|_| ())
+            .map_err(|e| format!("LLVM build_return failed: {}", e))?,
+    };
 
     let engine: ExecutionEngine = module
         .create_jit_execution_engine(OptimizationLevel::None)
         .map_err(|e| format!("failed to create JIT execution engine: {}", e))?;
 
     // SAFETY: We just emitted the function with the matching signature and
-    // verified the body's width above. The module is owned by `engine`,
+    // verified the body's kind above. The module is owned by `engine`,
     // both are dropped at end of scope.
     let result = unsafe {
         match expected {
@@ -132,35 +169,71 @@ fn compile_and_run(
                 let func = engine
                     .get_function::<unsafe extern "C" fn() -> i32>("__expr")
                     .map_err(|e| format!("failed to look up __expr: {}", e))?;
-                func.call() as u64
+                BoundaryValue::from_u64(func.call() as u64)
             }
             ReturnKind::I64 => {
                 let func = engine
                     .get_function::<unsafe extern "C" fn() -> i64>("__expr")
                     .map_err(|e| format!("failed to look up __expr: {}", e))?;
-                func.call() as u64
+                BoundaryValue::from_u64(func.call() as u64)
             }
             ReturnKind::Bool => {
-                // i1 → u8 at the boundary (see jit_eval_bool).
                 let func = engine
                     .get_function::<unsafe extern "C" fn() -> u8>("__expr")
                     .map_err(|e| format!("failed to look up __expr: {}", e))?;
-                func.call() as u64
+                BoundaryValue::from_u64(func.call() as u64)
+            }
+            ReturnKind::F64 => {
+                let func = engine
+                    .get_function::<unsafe extern "C" fn() -> f64>("__expr")
+                    .map_err(|e| format!("failed to look up __expr: {}", e))?;
+                BoundaryValue::from_f64(func.call())
             }
         }
     };
     Ok(result)
 }
 
-impl ReturnKind {
-    /// Map the bit-width of the body's SSA value to the matching ReturnKind.
-    /// i1 → Bool, i32 → I32, i64 → I64. Anything else is unsupported here.
-    fn from_int_value(v: &IntValue<'_>) -> Result<Self, JitError> {
-        match v.get_type().get_bit_width() {
-            1 => Ok(ReturnKind::Bool),
-            32 => Ok(ReturnKind::I32),
-            64 => Ok(ReturnKind::I64),
-            other => Err(format!("unsupported integer width: i{}", other)),
+/// SSA value produced by `emit`. We split int and float because LLVM's
+/// arithmetic / comparison instructions are typed and the dispatch is
+/// cleaner here than re-classifying via `BasicValueEnum` everywhere.
+#[derive(Clone, Copy)]
+enum EmitVal<'ctx> {
+    Int(IntValue<'ctx>),
+    Float(FloatValue<'ctx>),
+}
+
+impl<'ctx> EmitVal<'ctx> {
+    fn return_kind(&self) -> Result<ReturnKind, JitError> {
+        match self {
+            EmitVal::Int(iv) => match iv.get_type().get_bit_width() {
+                1 => Ok(ReturnKind::Bool),
+                32 => Ok(ReturnKind::I32),
+                64 => Ok(ReturnKind::I64),
+                other => Err(format!("unsupported integer width: i{}", other)),
+            },
+            EmitVal::Float(_) => Ok(ReturnKind::F64),
+        }
+    }
+
+    /// Friendly name for error messages. Mirrors `ReturnKind::name`
+    /// but avoids the `Result` for the common case.
+    fn type_name(&self) -> &'static str {
+        match self {
+            EmitVal::Int(iv) => match iv.get_type().get_bit_width() {
+                1 => "bool",
+                32 => "i32",
+                64 => "i64",
+                _ => "int(?)",
+            },
+            EmitVal::Float(_) => "f64",
+        }
+    }
+
+    fn as_basic_value_enum(&self) -> BasicValueEnum<'ctx> {
+        match self {
+            EmitVal::Int(iv) => (*iv).into(),
+            EmitVal::Float(fv) => (*fv).into(),
         }
     }
 }
@@ -175,28 +248,24 @@ struct ExprCg<'ctx, 'a> {
 }
 
 impl<'ctx, 'a> ExprCg<'ctx, 'a> {
-    /// Generate IR for `expr`, returning the resulting integer SSA value
-    /// (treating `bool` as `i1`).
-    fn emit(&self, expr: &Expr) -> Result<IntValue<'ctx>, JitError> {
+    /// Generate IR for `expr`, returning the resulting SSA value.
+    fn emit(&self, expr: &Expr) -> Result<EmitVal<'ctx>, JitError> {
         match expr {
-            Expr::Integer32(n) => {
-                // i32 literal — `const_int` reads the bits of the supplied
-                // u64; passing `true` for sign_extend handles negatives.
-                Ok(self.context.i32_type().const_int(*n as u64, true))
-            }
+            Expr::Integer32(n) => Ok(EmitVal::Int(
+                self.context.i32_type().const_int(*n as u64, true),
+            )),
 
-            Expr::Integer64(n) => {
-                Ok(self.context.i64_type().const_int(*n as u64, true))
-            }
+            Expr::Integer64(n) => Ok(EmitVal::Int(
+                self.context.i64_type().const_int(*n as u64, true),
+            )),
 
-            Expr::Bool(b) => {
-                Ok(self.context.bool_type().const_int(u64::from(*b), false))
-            }
+            Expr::Float(n) => Ok(EmitVal::Float(self.context.f64_type().const_float(*n))),
+
+            Expr::Bool(b) => Ok(EmitVal::Int(
+                self.context.bool_type().const_int(u64::from(*b), false),
+            )),
 
             // `if` is its own AST node (not a List with "if" symbol).
-            // Emit cond → conditional branch into then/else blocks → phi
-            // in a merge block. This is the textbook lowering, taken
-            // straight from the Kaleidoscope tutorial.
             Expr::If { condition, then_branch, else_branch } => {
                 self.emit_if(condition, then_branch, else_branch)
             }
@@ -207,7 +276,8 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
                 if let Expr::Symbol(op) = &exprs[0] {
                     let args = &exprs[1..];
                     match op.as_str() {
-                        "+" | "-" | "*" | "/" => self.gen_arith(op, args),
+                        "+" | "-" | "*" | "/" => self.gen_int_arith(op, args),
+                        "+." | "-." | "*." | "/." => self.gen_float_arith(op, args),
                         "=" | "<" | ">" | "<=" | ">=" => self.gen_cmp(op, args),
                         "and" => self.gen_and(args),
                         "or" => self.gen_or(args),
@@ -218,13 +288,10 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
                         )),
                     }
                 } else {
-                    Err("--llvm: only operator-headed lists are supported in Step 4".to_string())
+                    Err("--llvm: only operator-headed lists are supported in Step 5".to_string())
                 }
             }
 
-            // `Expr::Call` is what bare `(f x y)` parses to. For now we
-            // only handle the operator forms above. Calls land here only
-            // for user-defined functions, which Step 7 will enable.
             Expr::Call { .. } => {
                 Err("--llvm: function calls are not supported yet (Step 7)".to_string())
             }
@@ -238,10 +305,8 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
 
     /// Generate `(op arg0 arg1 ...)` for binary integer arithmetic.
     /// Variadic in source (`(+ 1 2 3)`) is left-folded. Width is taken
-    /// from the first operand; subsequent operands must match. The type
-    /// checker normally guarantees this, so a mismatch here is a bug
-    /// rather than user error.
-    fn gen_arith(&self, op: &str, args: &[Expr]) -> Result<IntValue<'ctx>, JitError> {
+    /// from the first operand.
+    fn gen_int_arith(&self, op: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.len() < 2 {
             return Err(format!(
                 "operator `{}` requires at least 2 arguments, got {}",
@@ -249,17 +314,16 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
                 args.len()
             ));
         }
-
-        let mut acc = self.emit(&args[0])?;
+        let mut acc = self.expect_int(&self.emit(&args[0])?, op)?;
         let acc_width = acc.get_type().get_bit_width();
         if acc_width != 32 && acc_width != 64 {
             return Err(format!(
-                "operator `{}` requires integer operands, got i{}",
+                "operator `{}` requires i32/i64 operands, got i{}",
                 op, acc_width
             ));
         }
         for arg in &args[1..] {
-            let rhs = self.emit(arg)?;
+            let rhs = self.expect_int(&self.emit(arg)?, op)?;
             if rhs.get_type().get_bit_width() != acc_width {
                 return Err(format!(
                     "operator `{}`: operand width mismatch (i{} vs i{}) — \
@@ -289,13 +353,53 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
                 _ => unreachable!("operator dispatch checked already"),
             };
         }
-        Ok(acc)
+        Ok(EmitVal::Int(acc))
     }
 
-    /// Generate a binary integer comparison `(op a b)`. Result is `i1`.
-    /// Comparisons in Rusp are strictly binary (the type checker rejects
-    /// arity != 2), so we don't try to fold variadic forms.
-    fn gen_cmp(&self, op: &str, args: &[Expr]) -> Result<IntValue<'ctx>, JitError> {
+    /// Generate `(op. arg0 arg1 ...)` for binary float arithmetic.
+    /// Mirrors `gen_int_arith`. Rusp's float ops are syntactically
+    /// distinct from int ones (`+.` vs `+`), so the type checker has
+    /// already guaranteed every operand is f64.
+    fn gen_float_arith(&self, op: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
+        if args.len() < 2 {
+            return Err(format!(
+                "operator `{}` requires at least 2 arguments, got {}",
+                op,
+                args.len()
+            ));
+        }
+        let mut acc = self.expect_float(&self.emit(&args[0])?, op)?;
+        for arg in &args[1..] {
+            let rhs = self.expect_float(&self.emit(arg)?, op)?;
+            acc = match op {
+                "+." => self
+                    .builder
+                    .build_float_add(acc, rhs, "faddtmp")
+                    .map_err(|e| format!("LLVM build_float_add failed: {}", e))?,
+                "-." => self
+                    .builder
+                    .build_float_sub(acc, rhs, "fsubtmp")
+                    .map_err(|e| format!("LLVM build_float_sub failed: {}", e))?,
+                "*." => self
+                    .builder
+                    .build_float_mul(acc, rhs, "fmultmp")
+                    .map_err(|e| format!("LLVM build_float_mul failed: {}", e))?,
+                "/." => self
+                    .builder
+                    .build_float_div(acc, rhs, "fdivtmp")
+                    .map_err(|e| format!("LLVM build_float_div failed: {}", e))?,
+                _ => unreachable!("operator dispatch checked already"),
+            };
+        }
+        Ok(EmitVal::Float(acc))
+    }
+
+    /// Generate a binary comparison `(op a b)` → `i1`.
+    /// Dispatches on the LHS's value kind: integers use signed
+    /// predicates, floats use ordered predicates (OEQ/OLT/...).
+    /// "Ordered" means NaN compares false, matching the interpreter's
+    /// IEEE-754 semantics.
+    fn gen_cmp(&self, op: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.len() != 2 {
             return Err(format!(
                 "comparison `{}` requires exactly 2 arguments, got {}",
@@ -305,64 +409,84 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
         }
         let lhs = self.emit(&args[0])?;
         let rhs = self.emit(&args[1])?;
-        let lw = lhs.get_type().get_bit_width();
-        let rw = rhs.get_type().get_bit_width();
-        if lw != rw {
-            return Err(format!(
-                "comparison `{}`: operand width mismatch (i{} vs i{})",
-                op, lw, rw
-            ));
+        match (lhs, rhs) {
+            (EmitVal::Int(l), EmitVal::Int(r)) => {
+                let lw = l.get_type().get_bit_width();
+                let rw = r.get_type().get_bit_width();
+                if lw != rw {
+                    return Err(format!(
+                        "comparison `{}`: operand width mismatch (i{} vs i{})",
+                        op, lw, rw
+                    ));
+                }
+                if lw != 32 && lw != 64 {
+                    return Err(format!(
+                        "comparison `{}` only supports i32/i64 integer operands, got i{}",
+                        op, lw
+                    ));
+                }
+                let pred = match op {
+                    "=" => IntPredicate::EQ,
+                    "<" => IntPredicate::SLT,
+                    ">" => IntPredicate::SGT,
+                    "<=" => IntPredicate::SLE,
+                    ">=" => IntPredicate::SGE,
+                    _ => unreachable!("comparison dispatch checked already"),
+                };
+                let r = self
+                    .builder
+                    .build_int_compare(pred, l, r, "cmptmp")
+                    .map_err(|e| format!("LLVM build_int_compare failed: {}", e))?;
+                Ok(EmitVal::Int(r))
+            }
+            (EmitVal::Float(l), EmitVal::Float(r)) => {
+                let pred = match op {
+                    "=" => FloatPredicate::OEQ,
+                    "<" => FloatPredicate::OLT,
+                    ">" => FloatPredicate::OGT,
+                    "<=" => FloatPredicate::OLE,
+                    ">=" => FloatPredicate::OGE,
+                    _ => unreachable!("comparison dispatch checked already"),
+                };
+                let r = self
+                    .builder
+                    .build_float_compare(pred, l, r, "fcmptmp")
+                    .map_err(|e| format!("LLVM build_float_compare failed: {}", e))?;
+                Ok(EmitVal::Int(r))
+            }
+            (l, r) => Err(format!(
+                "comparison `{}`: cannot compare {} with {}",
+                op,
+                l.type_name(),
+                r.type_name()
+            )),
         }
-        if lw != 32 && lw != 64 {
-            return Err(format!(
-                "comparison `{}` only supports integer operands (i32/i64), got i{}",
-                op, lw
-            ));
-        }
-        let pred = match op {
-            "=" => IntPredicate::EQ,
-            "<" => IntPredicate::SLT,
-            ">" => IntPredicate::SGT,
-            "<=" => IntPredicate::SLE,
-            ">=" => IntPredicate::SGE,
-            _ => unreachable!("comparison dispatch checked already"),
-        };
-        self.builder
-            .build_int_compare(pred, lhs, rhs, "cmptmp")
-            .map_err(|e| format!("LLVM build_int_compare failed: {}", e))
     }
 
     /// Lower `(if c t e)` with a phi at the merge.
-    ///
-    /// Layout:
-    ///   ; current block evaluates `c`, then conditional branch
-    ///   then_bb: <emit t>; br merge
-    ///   else_bb: <emit e>; br merge
-    ///   merge: %r = phi [t_val, then_end], [e_val, else_end]
-    ///
-    /// We capture the *end-of-arm* block (not the start) because each
-    /// arm's emit can itself create new blocks (nested ifs etc.), and
-    /// phi must reference the block that actually fell through to merge.
     fn emit_if(
         &self,
         cond: &Expr,
         then_e: &Expr,
         else_e: &Expr,
-    ) -> Result<IntValue<'ctx>, JitError> {
+    ) -> Result<EmitVal<'ctx>, JitError> {
         let cond_v = self.emit(cond)?;
-        if cond_v.get_type().get_bit_width() != 1 {
-            return Err(format!(
-                "`if` condition must be bool, got i{}",
-                cond_v.get_type().get_bit_width()
-            ));
-        }
+        let cond_int = match cond_v {
+            EmitVal::Int(iv) if iv.get_type().get_bit_width() == 1 => iv,
+            other => {
+                return Err(format!(
+                    "`if` condition must be bool, got {}",
+                    other.type_name()
+                ));
+            }
+        };
 
         let then_bb = self.context.append_basic_block(self.function, "then");
         let else_bb = self.context.append_basic_block(self.function, "else");
         let merge_bb = self.context.append_basic_block(self.function, "ifcont");
 
         self.builder
-            .build_conditional_branch(cond_v, then_bb, else_bb)
+            .build_conditional_branch(cond_int, then_bb, else_bb)
             .map_err(|e| format!("LLVM build_conditional_branch failed: {}", e))?;
 
         // then arm
@@ -381,14 +505,16 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             .build_unconditional_branch(merge_bb)
             .map_err(|e| format!("LLVM build_unconditional_branch failed: {}", e))?;
 
-        // Both arms must produce the same type. The type checker enforces
+        // Both arms must produce the same kind. The type checker enforces
         // this; check defensively.
-        if then_v.get_type() != else_v.get_type() {
+        let then_be = then_v.as_basic_value_enum();
+        let else_be = else_v.as_basic_value_enum();
+        if then_be.get_type() != else_be.get_type() {
             return Err(format!(
-                "`if` branches have different types (i{} vs i{}) — \
+                "`if` branches have different types ({} vs {}) — \
                  the type checker should have caught this",
-                then_v.get_type().get_bit_width(),
-                else_v.get_type().get_bit_width()
+                then_v.type_name(),
+                else_v.type_name()
             ));
         }
 
@@ -396,68 +522,54 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
         self.builder.position_at_end(merge_bb);
         let phi = self
             .builder
-            .build_phi(then_v.get_type(), "iftmp")
+            .build_phi(then_be.get_type(), "iftmp")
             .map_err(|e| format!("LLVM build_phi failed: {}", e))?;
-        phi.add_incoming(&[(&then_v, then_end), (&else_v, else_end)]);
-        Ok(phi.as_basic_value().into_int_value())
+        phi.add_incoming(&[(&then_be, then_end), (&else_be, else_end)]);
+
+        let merged = phi.as_basic_value();
+        Ok(match (then_v, else_v) {
+            (EmitVal::Int(_), _) => EmitVal::Int(merged.into_int_value()),
+            (EmitVal::Float(_), _) => EmitVal::Float(merged.into_float_value()),
+        })
     }
 
     /// Short-circuit `and`. Variadic: `(and a b c)` is left-folded so
-    /// that any false short-circuits to false without evaluating the
-    /// rest. We implement each step as
-    ///   if acc then (eval next) else false
-    /// which the optimizer collapses to a chain of basic blocks anyway,
-    /// so this stays simple.
-    fn gen_and(&self, args: &[Expr]) -> Result<IntValue<'ctx>, JitError> {
+    /// that any false short-circuits to false without evaluating the rest.
+    fn gen_and(&self, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.is_empty() {
-            // `(and)` is conventionally `true` in Lisp; Rusp's type
-            // checker rejects this anyway, but keep behavior defined.
-            return Ok(self.context.bool_type().const_int(1, false));
+            return Ok(EmitVal::Int(self.context.bool_type().const_int(1, false)));
         }
-        let mut acc = self.emit(&args[0])?;
+        let mut acc = self.expect_bool(&self.emit(&args[0])?, "and")?;
         for arg in &args[1..] {
             acc = self.short_circuit(acc, arg, ShortCircuit::And)?;
         }
-        Ok(acc)
+        Ok(EmitVal::Int(acc))
     }
 
     /// Short-circuit `or`. Mirror of `gen_and`.
-    fn gen_or(&self, args: &[Expr]) -> Result<IntValue<'ctx>, JitError> {
+    fn gen_or(&self, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.is_empty() {
-            return Ok(self.context.bool_type().const_int(0, false));
+            return Ok(EmitVal::Int(self.context.bool_type().const_int(0, false)));
         }
-        let mut acc = self.emit(&args[0])?;
+        let mut acc = self.expect_bool(&self.emit(&args[0])?, "or")?;
         for arg in &args[1..] {
             acc = self.short_circuit(acc, arg, ShortCircuit::Or)?;
         }
-        Ok(acc)
+        Ok(EmitVal::Int(acc))
     }
 
     /// Lower `acc OP rhs` as a control-flow short-circuit and phi.
-    ///
-    /// And: if acc then rhs else false
-    /// Or:  if acc then true else rhs
     fn short_circuit(
         &self,
         acc: IntValue<'ctx>,
         rhs_expr: &Expr,
         kind: ShortCircuit,
     ) -> Result<IntValue<'ctx>, JitError> {
-        if acc.get_type().get_bit_width() != 1 {
-            return Err(format!(
-                "`{}` operand must be bool, got i{}",
-                kind.name(),
-                acc.get_type().get_bit_width()
-            ));
-        }
-
         let bool_t = self.context.bool_type();
         let eval_bb = self.context.append_basic_block(self.function, kind.eval_label());
         let skip_bb = self.context.append_basic_block(self.function, kind.skip_label());
         let merge_bb = self.context.append_basic_block(self.function, "sccont");
 
-        // Branch direction depends on the operator: for `and`, evaluate
-        // rhs only if acc is true; for `or`, only if acc is false.
         let (then_target, else_target) = match kind {
             ShortCircuit::And => (eval_bb, skip_bb),
             ShortCircuit::Or => (skip_bb, eval_bb),
@@ -466,24 +578,15 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             .build_conditional_branch(acc, then_target, else_target)
             .map_err(|e| format!("LLVM build_conditional_branch failed: {}", e))?;
 
-        // Evaluation block: emit rhs and branch to merge.
         self.builder.position_at_end(eval_bb);
-        let rhs = self.emit(rhs_expr)?;
-        if rhs.get_type().get_bit_width() != 1 {
-            return Err(format!(
-                "`{}` operand must be bool, got i{}",
-                kind.name(),
-                rhs.get_type().get_bit_width()
-            ));
-        }
+        let rhs = self.expect_bool(&self.emit(rhs_expr)?, kind.name())?;
         let eval_end = self.builder.get_insert_block().expect("eval has insert block");
         self.builder
             .build_unconditional_branch(merge_bb)
             .map_err(|e| format!("LLVM build_unconditional_branch failed: {}", e))?;
 
-        // Skip block: short-circuit constant.
         self.builder.position_at_end(skip_bb);
-        let short_v: IntValue<'ctx> = match kind {
+        let short_v = match kind {
             ShortCircuit::And => bool_t.const_int(0, false),
             ShortCircuit::Or => bool_t.const_int(1, false),
         };
@@ -492,7 +595,6 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             .build_unconditional_branch(merge_bb)
             .map_err(|e| format!("LLVM build_unconditional_branch failed: {}", e))?;
 
-        // Merge with phi.
         self.builder.position_at_end(merge_bb);
         let phi = self
             .builder
@@ -502,26 +604,54 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
         Ok(phi.as_basic_value().into_int_value())
     }
 
-    /// `(not b)` → `b XOR 1`. No control flow needed since it always
-    /// evaluates the operand.
-    fn gen_not(&self, args: &[Expr]) -> Result<IntValue<'ctx>, JitError> {
+    /// `(not b)` → `b XOR 1`.
+    fn gen_not(&self, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
         if args.len() != 1 {
             return Err(format!(
                 "`not` requires exactly 1 argument, got {}",
                 args.len()
             ));
         }
-        let v = self.emit(&args[0])?;
-        if v.get_type().get_bit_width() != 1 {
-            return Err(format!(
-                "`not` operand must be bool, got i{}",
-                v.get_type().get_bit_width()
-            ));
-        }
+        let v = self.expect_bool(&self.emit(&args[0])?, "not")?;
         let one = self.context.bool_type().const_int(1, false);
-        self.builder
+        let r = self
+            .builder
             .build_xor(v, one, "nottmp")
-            .map_err(|e| format!("LLVM build_xor failed: {}", e))
+            .map_err(|e| format!("LLVM build_xor failed: {}", e))?;
+        Ok(EmitVal::Int(r))
+    }
+
+    fn expect_int(&self, v: &EmitVal<'ctx>, op: &str) -> Result<IntValue<'ctx>, JitError> {
+        match v {
+            EmitVal::Int(iv) if iv.get_type().get_bit_width() != 1 => Ok(*iv),
+            other => Err(format!(
+                "operator `{}` requires integer operands, got {}",
+                op,
+                other.type_name()
+            )),
+        }
+    }
+
+    fn expect_float(&self, v: &EmitVal<'ctx>, op: &str) -> Result<FloatValue<'ctx>, JitError> {
+        match v {
+            EmitVal::Float(fv) => Ok(*fv),
+            other => Err(format!(
+                "operator `{}` requires float operands, got {}",
+                op,
+                other.type_name()
+            )),
+        }
+    }
+
+    fn expect_bool(&self, v: &EmitVal<'ctx>, op: &str) -> Result<IntValue<'ctx>, JitError> {
+        match v {
+            EmitVal::Int(iv) if iv.get_type().get_bit_width() == 1 => Ok(*iv),
+            other => Err(format!(
+                "operator `{}` operand must be bool, got {}",
+                op,
+                other.type_name()
+            )),
+        }
     }
 }
 

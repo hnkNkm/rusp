@@ -227,9 +227,72 @@ mod tests {
         assert!(jit_bool("(not (and (< 1 2) (> 1 3)))").unwrap());
     }
 
+    // ----------- Step 5: f64 arithmetic and comparison -----------
+
+    fn jit_f64(input: &str) -> Result<f64, String> {
+        let ast = parser::parse(input).map_err(|e| e.to_string())?;
+        codegen::jit_eval_f64(&ast)
+    }
+
+    #[test]
+    fn jit_f64_literal() {
+        assert_eq!(jit_f64("1.5").unwrap(), 1.5);
+        assert_eq!(jit_f64("0.0").unwrap(), 0.0);
+        assert_eq!(jit_f64("-2.25").unwrap(), -2.25);
+    }
+
+    #[test]
+    fn jit_f64_arithmetic() {
+        assert_eq!(jit_f64("(+. 1.5 2.5)").unwrap(), 4.0);
+        assert_eq!(jit_f64("(-. 5.0 1.5)").unwrap(), 3.5);
+        assert_eq!(jit_f64("(*. 2.0 3.5)").unwrap(), 7.0);
+        assert_eq!(jit_f64("(/. 7.0 2.0)").unwrap(), 3.5);
+    }
+
+    #[test]
+    fn jit_f64_variadic_left_fold() {
+        assert_eq!(jit_f64("(+. 1.0 2.0 3.0 4.0)").unwrap(), 10.0);
+        assert_eq!(jit_f64("(*. 2.0 3.0 4.0)").unwrap(), 24.0);
+    }
+
+    #[test]
+    fn jit_f64_nested() {
+        assert_eq!(jit_f64("(*. (+. 1.0 2.0) 3.0)").unwrap(), 9.0);
+        assert_eq!(jit_f64("(+. (*. 2.0 3.0) (-. 10.0 4.0))").unwrap(), 12.0);
+    }
+
+    #[test]
+    fn jit_f64_comparison() {
+        assert!(jit_bool("(= 1.5 1.5)").unwrap());
+        assert!(!jit_bool("(= 1.5 2.5)").unwrap());
+        assert!(jit_bool("(< 1.5 2.5)").unwrap());
+        assert!(!jit_bool("(< 2.5 1.5)").unwrap());
+        assert!(jit_bool("(> 3.0 1.0)").unwrap());
+        assert!(jit_bool("(<= 1.5 1.5)").unwrap());
+        assert!(jit_bool("(>= 2.0 1.0)").unwrap());
+    }
+
+    #[test]
+    fn jit_f64_with_if() {
+        // `if` returning f64 — phi merge on f64 type.
+        assert_eq!(jit_f64("(if true 1.5 2.5)").unwrap(), 1.5);
+        assert_eq!(jit_f64("(if false 1.5 2.5)").unwrap(), 2.5);
+        // Condition uses float comparison.
+        assert_eq!(jit_f64("(if (< 1.5 2.0) 10.0 20.0)").unwrap(), 10.0);
+    }
+
+    #[test]
+    fn jit_int_op_on_float_is_error() {
+        // `+` on floats is rejected by the type checker, but the codegen
+        // path also rejects it defensively.
+        let err = jit_f64("(+ 1.0 2.0)").unwrap_err();
+        // The type checker fires first ("expected i32" or similar).
+        assert!(!err.is_empty());
+    }
+
     #[test]
     fn jit_unsupported_node_is_error_not_panic() {
-        // Anything outside Step 4's scope must return Err so that the
+        // Anything outside Step 5's scope must return Err so that the
         // future `--llvm` REPL surfaces a clean message instead of crashing.
         // `let-in` lands in Step 6, so it's still unsupported.
         let err = jit_i32("(let x 1 x)").unwrap_err();
