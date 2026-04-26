@@ -1,4 +1,4 @@
-//! Minimal JIT entry point for Steps 2–7: parse → type-check → codegen → run.
+//! Minimal JIT entry point for Steps 2–8: parse → type-check → codegen → run.
 //!
 //! Supports:
 //! - i32/i64 literals and integer arithmetic (`+`, `-`, `*`, `/`)
@@ -9,6 +9,7 @@
 //! - `and`/`or`/`not` (short-circuit for `and`/`or`, xor for `not`)
 //! - `let`-in (lexical bindings via a flat HashMap; SSA values, no alloca)
 //! - `defn` + `(f x y)` calls, including direct recursion
+//! - `(fn [...] body)` capture-free lambdas — bound via `let` and called by name
 //!
 //! Integer arithmetic / comparison forms infer their width from the
 //! leading operand; the type checker has already enforced that every
@@ -30,6 +31,7 @@ use inkwell::values::{
 };
 use inkwell::{FloatPredicate, IntPredicate};
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use crate::ast::{Expr, Type};
@@ -135,6 +137,7 @@ fn emit_defn<'ctx>(
     module: &Module<'ctx>,
     builder: &Builder<'ctx>,
     functions: &mut HashMap<String, FunctionValue<'ctx>>,
+    lambda_counter: &Cell<u32>,
     expr: &Expr,
 ) -> Result<(), JitError> {
     let Expr::Defn { name, params, return_type, body } = expr else {
@@ -166,15 +169,20 @@ fn emit_defn<'ctx>(
 
     let mut cg = ExprCg {
         context,
+        module,
         builder,
         function,
         env,
         functions: functions.clone(),
+        lambda_counter,
     };
     let body_val = cg.emit(body)?;
 
-    // Body's kind must agree with the declared return type.
-    let body_basic = body_val.as_basic_value_enum();
+    // Body's kind must agree with the declared return type. FuncRef
+    // can't appear here because its `as_basic_value_enum()` errors out.
+    let body_basic = body_val.as_basic_value_enum().map_err(|e| {
+        format!("defn `{}`: cannot return a function value from a defn body: {}", name, e)
+    })?;
     if body_basic.get_type() != ret_basic {
         return Err(format!(
             "defn `{}`: body type {} doesn't match declared return type",
@@ -192,6 +200,12 @@ fn emit_defn<'ctx>(
             .build_return(Some(&fv as &dyn BasicValue))
             .map(|_| ())
             .map_err(|e| format!("LLVM build_return failed: {}", e))?,
+        EmitVal::FuncRef(_) => {
+            return Err(format!(
+                "defn `{}`: cannot return a function value from a defn body",
+                name
+            ));
+        }
     };
 
     // Functions discovered while emitting this body (none for now,
@@ -294,8 +308,9 @@ fn compile_program_and_run(
     // registered in `functions` *before* its body is emitted so that
     // recursive self-calls resolve.
     let mut functions: HashMap<String, FunctionValue<'_>> = HashMap::new();
+    let lambda_counter: Cell<u32> = Cell::new(0);
     for d in &defns {
-        emit_defn(context, &module, &builder, &mut functions, d)?;
+        emit_defn(context, &module, &builder, &mut functions, &lambda_counter, d)?;
     }
 
     // Now emit the top-level thunk for the final expression.
@@ -312,10 +327,12 @@ fn compile_program_and_run(
 
     let mut cg = ExprCg {
         context,
+        module: &module,
         builder: &builder,
         function,
         env: HashMap::new(),
         functions,
+        lambda_counter: &lambda_counter,
     };
     let value = cg.emit(expr)?;
 
@@ -339,6 +356,12 @@ fn compile_program_and_run(
             .build_return(Some(&fv as &dyn BasicValue))
             .map(|_| ())
             .map_err(|e| format!("LLVM build_return failed: {}", e))?,
+        EmitVal::FuncRef(_) => {
+            // Already rejected by `return_kind()` above; this is defensive.
+            return Err(
+                "--llvm: top-level expression evaluates to a function value".to_string(),
+            );
+        }
     };
 
     let engine: ExecutionEngine = module
@@ -382,10 +405,16 @@ fn compile_program_and_run(
 /// SSA value produced by `emit`. We split int and float because LLVM's
 /// arithmetic / comparison instructions are typed and the dispatch is
 /// cleaner here than re-classifying via `BasicValueEnum` everywhere.
+///
+/// `FuncRef` is a *symbolic* reference to an LLVM function. Capture-
+/// free lambdas produce a FuncRef that can flow through `let` and
+/// land in a Call's head position. FuncRefs don't have a runtime
+/// representation: returning one from the top-level thunk is an error.
 #[derive(Clone, Copy)]
 enum EmitVal<'ctx> {
     Int(IntValue<'ctx>),
     Float(FloatValue<'ctx>),
+    FuncRef(FunctionValue<'ctx>),
 }
 
 impl<'ctx> EmitVal<'ctx> {
@@ -398,11 +427,15 @@ impl<'ctx> EmitVal<'ctx> {
                 other => Err(format!("unsupported integer width: i{}", other)),
             },
             EmitVal::Float(_) => Ok(ReturnKind::F64),
+            EmitVal::FuncRef(_) => Err(
+                "--llvm: top-level expression evaluates to a function value, \
+                 which has no runtime representation in this JIT"
+                    .to_string(),
+            ),
         }
     }
 
-    /// Friendly name for error messages. Mirrors `ReturnKind::name`
-    /// but avoids the `Result` for the common case.
+    /// Friendly name for error messages.
     fn type_name(&self) -> &'static str {
         match self {
             EmitVal::Int(iv) => match iv.get_type().get_bit_width() {
@@ -412,13 +445,20 @@ impl<'ctx> EmitVal<'ctx> {
                 _ => "int(?)",
             },
             EmitVal::Float(_) => "f64",
+            EmitVal::FuncRef(_) => "fn",
         }
     }
 
-    fn as_basic_value_enum(&self) -> BasicValueEnum<'ctx> {
+    /// Convert to a BasicValueEnum where possible. FuncRefs have no
+    /// such representation, so callers that rely on this must already
+    /// have rejected FuncRefs.
+    fn as_basic_value_enum(&self) -> Result<BasicValueEnum<'ctx>, JitError> {
         match self {
-            EmitVal::Int(iv) => (*iv).into(),
-            EmitVal::Float(fv) => (*fv).into(),
+            EmitVal::Int(iv) => Ok((*iv).into()),
+            EmitVal::Float(fv) => Ok((*fv).into()),
+            EmitVal::FuncRef(_) => Err(
+                "--llvm: function reference cannot appear here as a value".to_string(),
+            ),
         }
     }
 }
@@ -428,6 +468,10 @@ impl<'ctx> EmitVal<'ctx> {
 /// `if` / short-circuit forms can append fresh basic blocks.
 struct ExprCg<'ctx, 'a> {
     context: &'ctx Context,
+    /// The LLVM module we're emitting into. Lambda emission needs it
+    /// to register a new `FunctionValue`; arithmetic / control flow
+    /// don't, but the cost of carrying it everywhere is trivial.
+    module: &'a Module<'ctx>,
     builder: &'a Builder<'ctx>,
     function: FunctionValue<'ctx>,
     /// Lexical environment for `let`-bound names and function
@@ -440,6 +484,9 @@ struct ExprCg<'ctx, 'a> {
     /// currently-being-emitted function before its body is processed,
     /// so recursive calls resolve.
     functions: HashMap<String, FunctionValue<'ctx>>,
+    /// Shared counter for `__lambda_N` name generation. A `Cell` so
+    /// nested emits can bump it without re-borrowing `&mut self`.
+    lambda_counter: &'a Cell<u32>,
 }
 
 impl<'ctx, 'a> ExprCg<'ctx, 'a> {
@@ -471,6 +518,16 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             // Top-level `let` (no body) doesn't make sense for a
             // single-thunk JIT and is rejected here.
             Expr::Let { name, value, body, .. } => self.emit_let(name, value, body.as_deref()),
+
+            // `(fn [params] -> ret body)` — a capture-free anonymous
+            // function. We emit it as a real LLVM function with a
+            // synthetic name (`__lambda_N`) and return a `FuncRef`
+            // that can flow through `let` and land at a call site.
+            // The body is emitted with an env containing only the
+            // lambda's params (no enclosing-scope captures).
+            Expr::Lambda { params, return_type, body } => {
+                self.emit_lambda(params, return_type.as_ref(), body)
+            }
 
             // `if` is its own AST node (not a List with "if" symbol).
             Expr::If { condition, then_branch, else_branch } => {
@@ -722,9 +779,14 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             .map_err(|e| format!("LLVM build_unconditional_branch failed: {}", e))?;
 
         // Both arms must produce the same kind. The type checker enforces
-        // this; check defensively.
-        let then_be = then_v.as_basic_value_enum();
-        let else_be = else_v.as_basic_value_enum();
+        // this; check defensively. FuncRef can't go through phi (no
+        // basic-value representation), so we reject it here.
+        let then_be = then_v
+            .as_basic_value_enum()
+            .map_err(|e| format!("`if` then-branch: {}", e))?;
+        let else_be = else_v
+            .as_basic_value_enum()
+            .map_err(|e| format!("`if` else-branch: {}", e))?;
         if then_be.get_type() != else_be.get_type() {
             return Err(format!(
                 "`if` branches have different types ({} vs {}) — \
@@ -746,6 +808,13 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
         Ok(match (then_v, else_v) {
             (EmitVal::Int(_), _) => EmitVal::Int(merged.into_int_value()),
             (EmitVal::Float(_), _) => EmitVal::Float(merged.into_float_value()),
+            (EmitVal::FuncRef(_), _) => {
+                // Unreachable: `as_basic_value_enum` above would have
+                // erred on FuncRef.
+                return Err(
+                    "--llvm: `if` branches cannot produce function values".to_string(),
+                );
+            }
         })
     }
 
@@ -754,9 +823,17 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
     /// Since the parser produces all calls through `Expr::List`, we
     /// take the name as a `&str` directly.
     fn emit_user_call(&mut self, name: &str, args: &[Expr]) -> Result<EmitVal<'ctx>, JitError> {
-        let callee = self.functions.get(name).copied().ok_or_else(|| {
-            format!("--llvm: undefined function `{}`", name)
-        })?;
+        // Resolve the callee. We look first at user `defn`s, then at
+        // the lexical env for `let`-bound `FuncRef`s (capture-free
+        // lambdas land here). User names are kept distinct from
+        // builtin operators by the dispatch in `emit`.
+        let callee = if let Some(fv) = self.functions.get(name).copied() {
+            fv
+        } else if let Some(EmitVal::FuncRef(fv)) = self.env.get(name).copied() {
+            fv
+        } else {
+            return Err(format!("--llvm: undefined function `{}`", name));
+        };
 
         let expected_arity = callee.count_params() as usize;
         if args.len() != expected_arity {
@@ -774,6 +851,12 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             arg_vals.push(match v {
                 EmitVal::Int(iv) => iv.into(),
                 EmitVal::Float(fv) => fv.into(),
+                EmitVal::FuncRef(_) => {
+                    return Err(format!(
+                        "--llvm: cannot pass a function value as an argument to `{}`",
+                        name
+                    ));
+                }
             });
         }
 
@@ -816,6 +899,110 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
             }
         }
         result
+    }
+
+    /// `(fn [params] -> ret body)` — emit an anonymous LLVM function
+    /// and return a `FuncRef` to it. The lambda is emitted as a
+    /// top-level module function with a synthetic name (`__lambda_N`).
+    /// It is **capture-free**: the body cannot see any enclosing
+    /// `let`-bound names — that would require closure conversion,
+    /// which is out of scope for the MVP. This is enforced implicitly
+    /// because we build a fresh env containing only the params.
+    ///
+    /// The lambda's body is emitted *before* we return to the
+    /// enclosing emit, but we save and restore the builder position
+    /// so the enclosing function's IR is untouched.
+    fn emit_lambda(
+        &mut self,
+        params: &[(String, Type)],
+        return_type: Option<&Type>,
+        body: &Expr,
+    ) -> Result<EmitVal<'ctx>, JitError> {
+        let ret_ty = return_type.ok_or_else(|| {
+            "--llvm: lambda needs an explicit return type annotation \
+             (e.g. `(fn [x: i32] -> i32 ...)`); inference for lambda \
+             return types is not supported in the MVP"
+                .to_string()
+        })?;
+
+        // Build the LLVM function signature.
+        let param_tys: Vec<BasicMetadataTypeEnum> = params
+            .iter()
+            .map(|(_, ty)| -> Result<BasicMetadataTypeEnum, JitError> {
+                Ok(type_to_basic(self.context, ty)?.into())
+            })
+            .collect::<Result<_, _>>()?;
+        let ret_basic = type_to_basic(self.context, ret_ty)?;
+        let fn_t = ret_basic.fn_type(&param_tys, false);
+
+        // Generate a fresh name. Module-unique by counter.
+        let id = self.lambda_counter.get();
+        self.lambda_counter.set(id + 1);
+        let lambda_name = format!("__lambda_{}", id);
+        let lambda_fv = self.module.add_function(&lambda_name, fn_t, None);
+
+        // Save builder position so we can restore after emitting body.
+        let saved_block = self.builder.get_insert_block();
+
+        // Emit body in a fresh env with only the lambda's params.
+        let entry = self.context.append_basic_block(lambda_fv, "entry");
+        self.builder.position_at_end(entry);
+
+        let mut lambda_env: HashMap<String, EmitVal<'ctx>> = HashMap::new();
+        for (i, (pname, _)) in params.iter().enumerate() {
+            let pv = lambda_fv
+                .get_nth_param(i as u32)
+                .ok_or_else(|| format!("lambda `{}`: missing param {}", lambda_name, i))?;
+            lambda_env.insert(pname.clone(), basic_to_emit(pv)?);
+        }
+
+        let mut inner = ExprCg {
+            context: self.context,
+            module: self.module,
+            builder: self.builder,
+            function: lambda_fv,
+            env: lambda_env,
+            functions: self.functions.clone(),
+            lambda_counter: self.lambda_counter,
+        };
+        let body_val = inner.emit(body)?;
+
+        let body_basic = body_val.as_basic_value_enum().map_err(|e| {
+            format!("lambda `{}`: {}", lambda_name, e)
+        })?;
+        if body_basic.get_type() != ret_basic {
+            return Err(format!(
+                "lambda `{}`: body type {} doesn't match declared return type",
+                lambda_name,
+                body_val.type_name()
+            ));
+        }
+        match body_val {
+            EmitVal::Int(iv) => self
+                .builder
+                .build_return(Some(&iv as &dyn BasicValue))
+                .map(|_| ())
+                .map_err(|e| format!("LLVM build_return failed: {}", e))?,
+            EmitVal::Float(fv) => self
+                .builder
+                .build_return(Some(&fv as &dyn BasicValue))
+                .map(|_| ())
+                .map_err(|e| format!("LLVM build_return failed: {}", e))?,
+            EmitVal::FuncRef(_) => {
+                return Err(format!(
+                    "lambda `{}`: cannot return a function value",
+                    lambda_name
+                ));
+            }
+        };
+
+        // Restore builder position so the enclosing emitter continues
+        // appending to the right block.
+        if let Some(bb) = saved_block {
+            self.builder.position_at_end(bb);
+        }
+
+        Ok(EmitVal::FuncRef(lambda_fv))
     }
 
     /// Short-circuit `and`. Variadic: `(and a b c)` is left-folded so

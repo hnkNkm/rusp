@@ -515,4 +515,73 @@ mod tests {
             err
         );
     }
+
+    // -------- Step 8: capture-free lambdas --------
+
+    #[test]
+    fn jit_lambda_let_bound_and_called_i32() {
+        // `(let f (fn ...) (f 21))` — the lambda flows through let as a
+        // FuncRef and lands at the call site.
+        let src = "(let twice (fn [x: i32] -> i32 (* x 2)) (twice 21))";
+        assert_eq!(jit_i32(src).unwrap(), 42);
+    }
+
+    #[test]
+    fn jit_lambda_two_params() {
+        let src = "(let add (fn [x: i32 y: i32] -> i32 (+ x y)) (add 3 4))";
+        assert_eq!(jit_i32(src).unwrap(), 7);
+    }
+
+    #[test]
+    fn jit_lambda_returning_bool() {
+        let src = "(let is-pos (fn [x: i32] -> bool (> x 0)) (is-pos 5))";
+        let forms = parse_program(src);
+        assert!(codegen::jit_eval_bool_program(&forms).unwrap());
+    }
+
+    #[test]
+    fn jit_lambda_returning_f64() {
+        let src = "(let half (fn [x: f64] -> f64 (*. x 0.5)) (half 8.0))";
+        let forms = parse_program(src);
+        let r = codegen::jit_eval_f64_program(&forms).unwrap();
+        assert!((r - 4.0).abs() < 1e-9, "got {}", r);
+    }
+
+    #[test]
+    fn jit_lambda_inside_defn_body() {
+        // Lambda emitted inside a defn — exercises the `module` /
+        // `lambda_counter` threading through the inner ExprCg.
+        let src = r#"
+            (defn apply-double [n: i32] -> i32
+              (let f (fn [x: i32] -> i32 (* x 2))
+                (f n)))
+            (apply-double 21)
+        "#;
+        assert_eq!(jit_i32_prog(src).unwrap(), 42);
+    }
+
+    #[test]
+    fn jit_lambda_top_level_returns_funcref_error() {
+        // Returning a lambda directly as the program's value — there's
+        // no boundary representation for FuncRef, so we must reject.
+        let err = jit_i32("(fn [x: i32] -> i32 x)").unwrap_err();
+        assert!(
+            err.contains("function value") || err.contains("function reference"),
+            "expected function-value rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn jit_lambda_without_return_type_errors() {
+        // The MVP requires explicit return type on lambdas so codegen
+        // doesn't have to do its own inference.
+        let src = "(let twice (fn [x: i32] (* x 2)) (twice 21))";
+        let err = jit_i32(src).unwrap_err();
+        assert!(
+            err.contains("return type"),
+            "expected return-type error, got: {}",
+            err
+        );
+    }
 }
