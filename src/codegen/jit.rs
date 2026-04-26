@@ -35,6 +35,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use crate::ast::{Expr, Type};
+use crate::types::{type_check, TypeEnv};
 
 pub type JitError = String;
 
@@ -912,18 +913,38 @@ impl<'ctx, 'a> ExprCg<'ctx, 'a> {
     /// The lambda's body is emitted *before* we return to the
     /// enclosing emit, but we save and restore the builder position
     /// so the enclosing function's IR is untouched.
+    ///
+    /// If the user omitted the return type (`(fn [x: i32] (* x 2))`),
+    /// we run a small type-check pass on the body in a fresh env
+    /// containing only the params, and use the inferred type. Since
+    /// the body is capture-free, the params are sufficient context.
+    /// (Once closures are added, this needs the enclosing TypeEnv.)
     fn emit_lambda(
         &mut self,
         params: &[(String, Type)],
         return_type: Option<&Type>,
         body: &Expr,
     ) -> Result<EmitVal<'ctx>, JitError> {
-        let ret_ty = return_type.ok_or_else(|| {
-            "--llvm: lambda needs an explicit return type annotation \
-             (e.g. `(fn [x: i32] -> i32 ...)`); inference for lambda \
-             return types is not supported in the MVP"
-                .to_string()
-        })?;
+        // Resolve the return type — declared, or inferred via a small
+        // type-check pass over the body. The pass is cheap (body is
+        // capture-free, so the env never grows beyond the params).
+        let inferred_ret;
+        let ret_ty: &Type = match return_type {
+            Some(t) => t,
+            None => {
+                let mut tenv = TypeEnv::new();
+                for (pname, pty) in params {
+                    tenv.insert(pname.clone(), pty.clone());
+                }
+                inferred_ret = type_check(body, &mut tenv).map_err(|e| {
+                    format!(
+                        "--llvm: failed to infer lambda return type: {}",
+                        e
+                    )
+                })?;
+                &inferred_ret
+            }
+        };
 
         // Build the LLVM function signature.
         let param_tys: Vec<BasicMetadataTypeEnum> = params
