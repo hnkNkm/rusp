@@ -94,7 +94,7 @@ fn main() {
                 if use_llvm {
                     match process_input_llvm(input, &mut type_env, &mut jit_defns) {
                         Ok(Some((rendered, ty))) => println!("{}: {}", rendered, ty),
-                        Ok(None) => {} // form was a defn — silently accumulated
+                        Ok(None) => {}
                         Err(e) => eprintln!("Error: {}", e),
                     }
                 } else {
@@ -244,8 +244,9 @@ fn run_build(args: &[String]) -> Result<(), String> {
 /// Always runs parse + type-check (so the user gets a uniform diagnostic
 /// experience regardless of backend). For `defn`, the form is registered
 /// in the type env and accumulated in `jit_defns` so subsequent
-/// expressions can call it; we don't JIT anything in this case and
-/// return `Ok(None)`.
+/// expressions can call it; we don't JIT the body yet, but we return the
+/// same `#<function:N>: fn(...)` line as the tree-walking REPL (`N` is
+/// arity, matching `Display` for `Value::Function`).
 ///
 /// For an expression, we build a program slice of `[..jit_defns, expr]`
 /// and dispatch to the right `jit_eval_*_program` based on the
@@ -261,10 +262,12 @@ fn process_input_llvm(
     let ast = parser::parse(input).map_err(|e| e.to_string())?;
     let ty = type_check(&ast, type_env)?;
 
-    if matches!(ast, Expr::Defn { .. }) {
-        // Type-checked successfully → register for future calls.
+    if let Expr::Defn { params, .. } = &ast {
+        // Match interpreter REPL: `#<function:<arity>>: fn(...) -> T`
+        // (`Value::Function` uses `params.len()` for the display id).
+        let rendered = format!("#<function:{}>", params.len());
         jit_defns.push(ast);
-        return Ok(None);
+        return Ok(Some((rendered, ty)));
     }
 
     let mut program: Vec<Expr> = jit_defns.clone();
@@ -283,6 +286,47 @@ fn process_input_llvm(
         }
     };
     Ok(Some((rendered, ty)))
+}
+
+#[cfg(test)]
+mod process_input_llvm_tests {
+    use super::process_input_llvm;
+    use rusp::ast::Type;
+    use rusp::types::TypeEnv;
+
+    #[test]
+    fn defn_returns_display_and_function_type() {
+        let mut type_env = TypeEnv::new();
+        let mut jit_defns = Vec::new();
+        let (s, ty) = process_input_llvm(
+            "(defn twice [x: i32] -> i32 (* x 2))",
+            &mut type_env,
+            &mut jit_defns,
+        )
+        .unwrap()
+        .expect("defn should print like interpreter");
+        assert_eq!(s, "#<function:1>");
+        assert!(
+            matches!(ty, Type::Function { .. }),
+            "expected function type, got {:?}",
+            ty
+        );
+        assert_eq!(jit_defns.len(), 1);
+    }
+
+    #[test]
+    fn defn_arity_two_in_display() {
+        let mut type_env = TypeEnv::new();
+        let mut jit_defns = Vec::new();
+        let (s, _) = process_input_llvm(
+            "(defn add [a: i32 b: i32] -> i32 (+ a b))",
+            &mut type_env,
+            &mut jit_defns,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(s, "#<function:2>");
+    }
 }
 
 #[cfg(test)]
